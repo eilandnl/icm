@@ -3095,7 +3095,9 @@ fn main() -> Result<()> {
                         &cfg.extraction,
                     )
                 }
-                HookCommands::Prompt => cmd_hook_prompt(&store, &cfg.archive, &cfg.recall),
+                HookCommands::Prompt => {
+                    cmd_hook_prompt(&store, &cfg.archive, &cfg.recall, &cfg.extraction)
+                }
                 HookCommands::Start { max_tokens } => {
                     let tokens = if max_tokens > 0 {
                         max_tokens
@@ -4640,7 +4642,7 @@ fn cmd_hook_compact(
         && extraction_cfg.enabled
         && extraction_cfg.summarizer.provider != "none"
     {
-        if enqueue_conversation(store, &input, extraction_cfg, "pre-compact") > 0 {
+        if enqueue_conversation(store, &input, extraction_cfg, "pre-compact", true) > 0 {
             spawn_detached_worker(&["extract-pending", "--limit", "20"], "extraction");
         }
         return Ok(());
@@ -4659,6 +4661,10 @@ fn cmd_hook_compact(
 /// conversation excerpts for `extract-pending` (see `conversation`), and
 /// record how far it went for this session. Returns the excerpts enqueued.
 ///
+/// `flush` (PreCompact, SessionEnd) queues everything up to the end of the
+/// transcript; without it (UserPromptSubmit) only full excerpts are queued
+/// and the rest is read again next time (see [`conversation::batch`]).
+///
 /// Nothing happens when extraction is disabled or has no LLM provider: the
 /// fastembed fallback is not meant for whole conversation excerpts. Errors
 /// are logged, never propagated: a hook must not fail the session.
@@ -4667,6 +4673,7 @@ fn enqueue_conversation(
     input: &str,
     extraction_cfg: &crate::config::ExtractionConfig,
     source: &str,
+    flush: bool,
 ) -> usize {
     if !extraction_cfg.enabled || extraction_cfg.summarizer.provider == "none" {
         return 0;
@@ -4690,19 +4697,24 @@ fn enqueue_conversation(
         .unwrap_or(0);
     // From the recorded byte offset, not from the start: a long session's
     // transcript outgrows any whole-file cap.
-    let Ok((text, end)) = conversation::read_new_lines(path, done, MAX_TRANSCRIPT_BYTES) else {
+    let Ok((text, start, read_end)) =
+        conversation::read_new_lines(path, done, MAX_TRANSCRIPT_BYTES)
+    else {
         return 0;
     };
-    let lines: Vec<&str> = text.lines().collect();
+    // A line longer than the read cap comes back as no text: skip past it.
+    let mut batch = conversation::batch(&text, start, flush);
+    if text.is_empty() {
+        batch.end = read_end;
+    }
 
     let project = project_from_cwd_json(&json).unwrap_or_else(|| "project".to_string());
-    let entries = conversation::render_entries(&lines);
     let mut enqueued = 0;
-    for excerpt in conversation::excerpts(&entries) {
+    for excerpt in &batch.excerpts {
         match store.enqueue_pending_extraction(
             &project,
             conversation::CONVERSATION_ROW_TOOL,
-            &excerpt,
+            excerpt,
         ) {
             Ok(_) => enqueued += 1,
             Err(e) => {
@@ -4711,7 +4723,9 @@ fn enqueue_conversation(
             }
         }
     }
-    if let Err(e) = store.set_metadata_str(&key, &end.to_string()) {
+    if batch.end != done
+        && let Err(e) = store.set_metadata_str(&key, &batch.end.to_string())
+    {
         eprintln!("[icm] {source}: conversation position not saved: {e}");
     }
     if enqueued > 0 {
@@ -4869,7 +4883,7 @@ fn cmd_hook_end(
         && let Ok(self_path) = std::env::current_exe()
     {
         // Queued before the fork so the worker drains it in this run.
-        enqueue_conversation(store, &input, extraction_cfg, "session-end");
+        enqueue_conversation(store, &input, extraction_cfg, "session-end", true);
         // `nohup`-style detach: redirect std{in,out,err} to /dev/null
         // and let the child outlive us. The child reads the same
         // config so it picks up the same provider.
@@ -5175,6 +5189,7 @@ fn cmd_hook_prompt(
     store: &Store,
     archive_cfg: &crate::config::ArchiveConfig,
     recall_cfg: &crate::config::RecallConfig,
+    extraction_cfg: &crate::config::ExtractionConfig,
 ) -> Result<()> {
     let Some(input) = read_stdin_utf8_lossy() else {
         return Ok(());
@@ -5230,13 +5245,23 @@ fn cmd_hook_prompt(
         Some(project.as_str())
     };
     // `[recall]` was documented but never read: the hook always injected 5
-    // memories, `enabled = false` included.
-    if !recall_cfg.enabled {
-        return Ok(());
+    // memories, `enabled = false` included. It turns off the injection
+    // only; the extraction below still runs.
+    if recall_cfg.enabled {
+        let ctx = extract::recall_context(store, query, project_filter, recall_cfg.limit)?;
+        if !ctx.is_empty() {
+            emit_hook_context(&ctx);
+        }
     }
-    let ctx = extract::recall_context(store, query, project_filter, recall_cfg.limit)?;
-    if !ctx.is_empty() {
-        emit_hook_context(&ctx);
+
+    // In-session extraction, after the recall so the prompt is not held up:
+    // each full excerpt is queued as soon as the conversation has one,
+    // instead of waiting for a compaction that may never come (a session
+    // that crashes, or is asked about before its first compaction).
+    if std::env::var_os("ICM_WORKER").is_none()
+        && enqueue_conversation(store, &input, extraction_cfg, "prompt", false) > 0
+    {
+        spawn_detached_worker(&["extract-pending", "--limit", "20"], "extraction");
     }
 
     Ok(())
@@ -19775,7 +19800,10 @@ mod conversation_queue_tests {
         .unwrap();
         let input = hook_input(&path);
 
-        assert_eq!(enqueue_conversation(&store, &input, &llm_cfg(), "test"), 1);
+        assert_eq!(
+            enqueue_conversation(&store, &input, &llm_cfg(), "test", true),
+            1
+        );
         let rows = store.list_pending_extractions(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].1, "myproj");
@@ -19787,7 +19815,10 @@ mod conversation_queue_tests {
         );
 
         // Nothing new: nothing enqueued.
-        assert_eq!(enqueue_conversation(&store, &input, &llm_cfg(), "test"), 0);
+        assert_eq!(
+            enqueue_conversation(&store, &input, &llm_cfg(), "test", true),
+            0
+        );
 
         // An appended line, and a last one still being written (no newline).
         let mut f = std::fs::OpenOptions::new()
@@ -19802,12 +19833,56 @@ mod conversation_queue_tests {
             line("user", "partial")
         )
         .unwrap();
-        assert_eq!(enqueue_conversation(&store, &input, &llm_cfg(), "test"), 1);
+        assert_eq!(
+            enqueue_conversation(&store, &input, &llm_cfg(), "test", true),
+            1
+        );
         let rows = store.list_pending_extractions(10).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows[1].3.contains("use port 8080"));
         assert!(!rows[1].3.contains("GKE"));
         assert!(!rows[1].3.contains("partial"));
+    }
+
+    /// In session (no flush): nothing until an excerpt is full, then only
+    /// full excerpts; the compaction that follows queues the rest, and no
+    /// line is queued twice.
+    #[test]
+    fn in_session_queues_full_excerpts_only_and_compaction_the_rest() {
+        let store = Store::in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let input = hook_input(&path);
+        let msg = |i: usize| format!("{}\n", line("user", &format!("m{i}:{}", "u".repeat(3_900))));
+
+        std::fs::write(&path, msg(0)).unwrap();
+        assert_eq!(
+            enqueue_conversation(&store, &input, &llm_cfg(), "test", false),
+            0
+        );
+        assert!(store.list_pending_extractions(10).unwrap().is_empty());
+
+        let all: String = (0..20).map(msg).collect();
+        std::fs::write(&path, &all).unwrap();
+        assert_eq!(
+            enqueue_conversation(&store, &input, &llm_cfg(), "test", false),
+            1
+        );
+        let first = store.list_pending_extractions(10).unwrap();
+        assert!(first[0].3.contains("m0:"));
+        assert!(!first[0].3.contains("m19:"));
+
+        assert_eq!(
+            enqueue_conversation(&store, &input, &llm_cfg(), "test", true),
+            1
+        );
+        let rows = store.list_pending_extractions(10).unwrap();
+        assert!(rows[1].3.contains("m19:"));
+        let queued: usize = rows
+            .iter()
+            .map(|r| r.3.matches("[2026-10-16T09:00 user] m").count())
+            .sum();
+        assert_eq!(queued, 20, "every message queued exactly once");
     }
 
     #[test]
@@ -19820,10 +19895,10 @@ mod conversation_queue_tests {
 
         let mut none = llm_cfg();
         none.summarizer.provider = "none".into();
-        assert_eq!(enqueue_conversation(&store, &input, &none, "test"), 0);
+        assert_eq!(enqueue_conversation(&store, &input, &none, "test", true), 0);
         let mut off = llm_cfg();
         off.enabled = false;
-        assert_eq!(enqueue_conversation(&store, &input, &off, "test"), 0);
+        assert_eq!(enqueue_conversation(&store, &input, &off, "test", true), 0);
         assert!(store.list_pending_extractions(10).unwrap().is_empty());
     }
 
