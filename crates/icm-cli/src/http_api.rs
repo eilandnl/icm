@@ -151,7 +151,13 @@ impl OutputFormat {
 
 #[derive(Debug, Deserialize)]
 pub struct RecallReq {
+    /// Required unless `queries` is given.
+    #[serde(default)]
     query: String,
+    /// Several queries ranked apart and merged into one list, each memory
+    /// once (#522). `query`, when given too, is the first of them. v2 only.
+    #[serde(default)]
+    queries: Vec<String>,
     #[serde(default)]
     topic: Option<String>,
     #[serde(default)]
@@ -523,6 +529,9 @@ fn run_recall_with(
     format: OutputFormat,
 ) -> Result<RecallResults> {
     match engine {
+        RecallEngine::Legacy if !req.queries.is_empty() => {
+            anyhow::bail!("`queries` needs the v2 engine")
+        }
         RecallEngine::Legacy => run_recall(state, req).map(|results| (results, Vec::new())),
         RecallEngine::V2 => run_recall_v2(state, req, format),
     }
@@ -540,6 +549,9 @@ fn recall_format_of(format: OutputFormat) -> RecallFormat {
     }
 }
 
+/// Most queries one `/recall` request ranks.
+const MAX_QUERIES: usize = 8;
+
 /// `limit` of a v2 request: default and ceiling. Without a budget they are
 /// the legacy ones. With a budget the budget does the cutting and `limit`
 /// is only a ceiling on the item count.
@@ -554,9 +566,20 @@ const V2_MAX_LIMIT_WITH_BUDGET: usize = 500;
 /// keyword-only ranking has no similarity to report). Under `max_tokens`,
 /// the body rendered in `format` fits the budget.
 fn run_recall_v2(state: &AppState, req: &RecallReq, format: OutputFormat) -> Result<RecallResults> {
-    if req.query.trim().is_empty() {
-        anyhow::bail!("missing required field: query");
+    let mut queries: Vec<&str> = Vec::new();
+    if !req.query.trim().is_empty() {
+        queries.push(&req.query);
     }
+    queries.extend(
+        req.queries
+            .iter()
+            .map(String::as_str)
+            .filter(|q| !q.trim().is_empty())
+            .take(MAX_QUERIES),
+    );
+    let Some(&first) = queries.first() else {
+        anyhow::bail!("missing required field: query (or queries)");
+    };
     let now = match req.now.as_deref() {
         Some(raw) => Some(icm_core::parse_instant(raw).map_err(|e| anyhow::anyhow!("now: {e}"))?),
         None => None,
@@ -571,7 +594,7 @@ fn run_recall_v2(state: &AppState, req: &RecallReq, format: OutputFormat) -> Res
     let rendered_as = recall_format_of(format);
     let envelope_tokens = crate::recall_header_tokens(with_score, rendered_as);
     let request = RecallRequest {
-        query: &req.query,
+        query: first,
         limit: req.limit.unwrap_or(default_limit).clamp(1, max_limit),
         max_tokens: req.max_tokens.map(|b| b.saturating_sub(envelope_tokens)),
         topic: req.topic.as_deref(),
@@ -582,9 +605,14 @@ fn run_recall_v2(state: &AppState, req: &RecallReq, format: OutputFormat) -> Res
     };
 
     let store = lock_store(state);
-    let outcome = request.run_with_cost(&store, state.embedder_ref(), &|m, score, raw| {
-        crate::rendered_recall_tokens_raw(m, with_score.then_some(score), raw, rendered_as)
-    })?;
+    let outcome = request.run_many_with_cost(
+        &queries[1..],
+        &store,
+        state.embedder_ref(),
+        &|m, score, raw| {
+            crate::rendered_recall_tokens_raw(m, with_score.then_some(score), raw, rendered_as)
+        },
+    )?;
     Ok(outcome
         .hits
         .into_iter()
@@ -1707,6 +1735,32 @@ mod tests {
         )
         .await;
         assert_eq!(rows(&body).len(), 12);
+    }
+
+    /// `queries` (#522) without `query`: each ranked, merged, each memory
+    /// once; neither field is a 400.
+    #[tokio::test]
+    async fn recall_takes_several_queries() {
+        if !recall_env_is_clean() {
+            return;
+        }
+        let store = Store::in_memory_with_dims(TEST_DIMS).unwrap();
+        for text in [
+            "sessions are cached in redis",
+            "billing runs on postgres",
+            "redis fronts postgres for billing",
+        ] {
+            store
+                .store(Memory::new("notes".into(), text.into(), Importance::Medium))
+                .unwrap();
+        }
+        let state = test_state(store, false);
+        let (status, body) = post_recall(&state, json!({"queries": ["redis", "postgres"]})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let got = ids(&rows(&body));
+        assert_eq!(got.len(), 3, "{body}");
+        let (status, _) = post_recall(&state, json!({"queries": ["  "]})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     /// The legacy engine, on request, runs the pre-v2 code and returns what

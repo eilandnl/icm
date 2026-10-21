@@ -186,6 +186,8 @@ curl -s -X POST '127.0.0.1:11435/recall?format=json' \
   -d '{"query":"hello","topic":"t"}'
 ```
 
+`/recall` also takes `queries` (with or instead of `query`, up to 8): each query is ranked on its own and the rankings are merged by rank fusion, each memory once.
+
 Endpoints: `POST /store`, `POST /recall`, `POST /consolidate`, `GET /stats`, `GET /topics`, `GET /health`. Optional `--token <T>` enables `Authorization: Bearer <T>` on every request (health stays open as a liveness probe). Bound to whatever address you pass; `127.0.0.1:<port>` keeps the server localhost-only.
 
 The embedding model is loaded once instead of on every CLI call, so any scripting language can hit semantic recall with plain `curl`. Requires the `http-api` feature (enabled by default). Issue [#290](https://github.com/rtk-ai/icm/issues/290).
@@ -290,7 +292,7 @@ memories and memoirs.
 | Tool | Description |
 |------|-------------|
 | `icm_memory_store` | Store, merging into a near-identical memory of the same topic (cosine above 0.95, with embeddings) |
-| `icm_memory_recall` | Search by query, filter by topic / keyword / project; `format: "json"` returns records with their `id` and `related_ids`, and on the default engine `bm25` and `similarity` (what the lexical and vector search measured, before the per-query normalization of `score`; absent when that search did not match or ran) |
+| `icm_memory_recall` | Search by query, filter by topic / keyword / project; `format: "json"` returns records with their `id` and `related_ids`, and on the default engine `bm25` and `similarity` (what the lexical and vector search measured, before the per-query normalization of `score`; absent when that search did not match or ran); `queries: [...]` (up to 8 more) ranks several queries in one call and merges them into one list, each memory once |
 | `icm_memory_related` | List the memories linked to one memory (`id`), up to `depth` links away, within the project |
 | `icm_memory_update` | Edit a memory in-place (content, importance, keywords) |
 | `icm_memory_forget` | Delete a memory by ID |
