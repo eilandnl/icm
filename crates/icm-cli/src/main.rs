@@ -3520,30 +3520,49 @@ fn render_recall_v2(
     // part in the ranking (a keyword-only ranking has no similarity to
     // report), and a blank query finds nothing instead of failing.
     let with_score = embedder.is_some();
-    let results: Vec<(Memory, Option<f32>)> = if request.query.trim().is_empty() {
-        Vec::new()
-    } else {
-        // The budget is spent on what `format` prints: its header once,
-        // then each memory as rendered.
-        let mut request = *request;
-        request.max_tokens = request
-            .max_tokens
-            .map(|budget| budget.saturating_sub(recall_header_tokens(with_score, format)));
-        let outcome = request.run_with_cost(store, embedder, &|memory, score| {
-            rendered_recall_tokens(memory, with_score.then_some(score), format)
-        })?;
-        outcome
-            .hits
-            .into_iter()
-            .map(|hit| (hit.memory, with_score.then_some(hit.score)))
-            .collect()
-    };
+    let (results, raw): (Vec<(Memory, Option<f32>)>, Vec<icm_core::RawRelevance>) =
+        if request.query.trim().is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            // The budget is spent on what `format` prints: its header once,
+            // then each memory as rendered.
+            let mut request = *request;
+            request.max_tokens = request
+                .max_tokens
+                .map(|budget| budget.saturating_sub(recall_header_tokens(with_score, format)));
+            let outcome = request.run_with_cost(store, embedder, &|memory, score, raw| {
+                rendered_recall_tokens_raw(memory, with_score.then_some(score), raw, format)
+            })?;
+            outcome
+                .hits
+                .into_iter()
+                .map(|hit| ((hit.memory, with_score.then_some(hit.score)), hit.raw))
+                .unzip()
+        };
     // The detail renderer has no representation for "nothing": keep the
     // human banner there, like the legacy path (audit #185 H8).
     if results.is_empty() && matches!(format, recall_format::RecallFormat::Detail) {
         return Ok(format!("{MSG_NO_MEMORIES}\n"));
     }
-    recall_format::render(&results, format)
+    recall_format::render_with_raw(&results, &raw, format)
+}
+
+/// [`rendered_recall_tokens`] with the raw relevance the JSON format shows
+/// beside the score.
+fn rendered_recall_tokens_raw(
+    memory: &Memory,
+    score: Option<f32>,
+    raw: &icm_core::RawRelevance,
+    format: recall_format::RecallFormat,
+) -> usize {
+    if !matches!(format, recall_format::RecallFormat::Json) || raw.is_empty() {
+        return rendered_recall_tokens(memory, score, format);
+    }
+    let one = [(memory.clone(), score)];
+    match recall_format::render_with_raw(&one, std::slice::from_ref(raw), format) {
+        Ok(body) => icm_core::estimate_tokens(&body),
+        Err(_) => usize::MAX,
+    }
 }
 
 /// Estimated tokens one recalled memory takes once rendered in `format`,

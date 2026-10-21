@@ -40,9 +40,24 @@ pub fn render(results: &[(Memory, Option<f32>)], format: RecallFormat) -> Result
     Ok(match format {
         RecallFormat::Toon => render_toon(results),
         RecallFormat::Detail => render_detail(results),
-        RecallFormat::Json => render_json(results)?,
+        RecallFormat::Json => render_json(results, &[])?,
         RecallFormat::Toml => render_toml(results)?,
     })
+}
+
+/// [`render`], with what each search arm measured for each result
+/// (`raw[i]` for `results[i]`; a shorter slice leaves the rest out). Only
+/// the JSON format shows it, as `bm25` and `similarity` beside `score`
+/// (#521): `score` is normalized per query, these are not.
+pub fn render_with_raw(
+    results: &[(Memory, Option<f32>)],
+    raw: &[icm_core::RawRelevance],
+    format: RecallFormat,
+) -> Result<String> {
+    match format {
+        RecallFormat::Json => render_json(results, raw),
+        other => render(results, other),
+    }
 }
 
 fn render_toon(results: &[(Memory, Option<f32>)]) -> String {
@@ -154,14 +169,22 @@ fn render_detail(results: &[(Memory, Option<f32>)]) -> String {
     out
 }
 
-fn render_json(results: &[(Memory, Option<f32>)]) -> Result<String> {
+fn render_json(
+    results: &[(Memory, Option<f32>)],
+    raw: &[icm_core::RawRelevance],
+) -> Result<String> {
     #[derive(Serialize)]
     struct Row {
         #[serde(skip_serializing_if = "Option::is_none")]
         score: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bm25: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        similarity: Option<f64>,
         #[serde(flatten)]
         memory: Memory,
     }
+    let rounded = |v: f32| (f64::from(v) * 1000.0).round() / 1000.0;
     // Audit finding: `Memory`'s own `embedding` field only skips
     // serialization when `None` — a hydrated search result (the normal
     // case for anything that went through vector/hybrid search) would dump
@@ -170,10 +193,17 @@ fn render_json(results: &[(Memory, Option<f32>)]) -> Result<String> {
     // cherry-picks fields specifically to drop embedding).
     let rows: Vec<Row> = results
         .iter()
-        .map(|(m, s)| {
+        .enumerate()
+        .map(|(i, (m, s))| {
             let mut memory = m.clone();
             memory.embedding = None;
-            Row { score: *s, memory }
+            let raw = raw.get(i).copied().unwrap_or_default();
+            Row {
+                score: *s,
+                bm25: raw.bm25.map(rounded),
+                similarity: raw.similarity.map(rounded),
+                memory,
+            }
         })
         .collect();
     Ok(serde_json::to_string_pretty(&rows)?)
@@ -229,6 +259,24 @@ fn render_toml(results: &[(Memory, Option<f32>)]) -> Result<String> {
 mod tests {
     use super::*;
     use icm_core::Importance;
+
+    #[test]
+    fn json_carries_the_raw_relevance_other_formats_do_not() {
+        let data = fixture();
+        let raw = [icm_core::RawRelevance {
+            bm25: Some(7.25),
+            similarity: Some(0.8123),
+        }];
+        let json: serde_json::Value =
+            serde_json::from_str(&render_with_raw(&data, &raw, RecallFormat::Json).unwrap())
+                .unwrap();
+        assert_eq!(json[0]["bm25"], 7.25);
+        assert_eq!(json[0]["similarity"], 0.812);
+        // Only the first result has raw values.
+        assert!(json[1].get("bm25").is_none());
+        let toon = render_with_raw(&data, &raw, RecallFormat::Toon).unwrap();
+        assert_eq!(toon, render(&data, RecallFormat::Toon).unwrap());
+    }
 
     fn fixture() -> Vec<(Memory, Option<f32>)> {
         let mut a = Memory::new("topic-a".into(), "first summary".into(), Importance::High);
@@ -303,7 +351,7 @@ mod tests {
 
     #[test]
     fn json_includes_score_field() {
-        let s = render_json(&fixture()).unwrap();
+        let s = render_json(&fixture(), &[]).unwrap();
         assert!(s.contains("\"score\""));
         assert!(s.contains("\"id\": \"01HZZ0\""));
     }
@@ -316,7 +364,7 @@ mod tests {
     fn json_omits_embedding_even_when_populated() {
         let mut data = fixture();
         data[0].0.embedding = Some(vec![0.1; 384]);
-        let s = render_json(&data).unwrap();
+        let s = render_json(&data, &[]).unwrap();
         assert!(
             !s.contains("\"embedding\""),
             "embedding must never be serialized in the JSON recall output"
@@ -400,7 +448,7 @@ mod tests {
             "memories[0]{id,topic,importance,weight,summary}:\n"
         );
         assert_eq!(render_detail(&empty), "");
-        assert_eq!(render_json(&empty).unwrap(), "[]");
+        assert_eq!(render_json(&empty, &[]).unwrap(), "[]");
     }
 
     #[test]

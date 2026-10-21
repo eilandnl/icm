@@ -15,7 +15,7 @@
 
 use super::*;
 
-use icm_core::fusion::{RRF_K, RankedHit, RankedList, RankedQuery, rrf_fuse};
+use icm_core::fusion::{RRF_K, RankedHit, RankedList, RankedQuery, RawRelevance, rrf_fuse};
 
 /// Floor on candidates per arm: the legacy pool size, so v2 never looks
 /// at fewer candidates than `search_hybrid` does.
@@ -32,6 +32,9 @@ const HYDRATE_CHUNK: usize = 500;
 /// One arm's candidates that passed the caller's filter, best first.
 struct Arm {
     kept: Vec<Memory>,
+    /// What the arm measured for each kept memory, by id: BM25 (lexical)
+    /// or cosine similarity (vector).
+    raw: HashMap<String, f32>,
     /// The arm returned as many rows as it was asked for: more may exist
     /// beyond `depth`.
     saturated: bool,
@@ -41,6 +44,7 @@ impl Arm {
     fn empty() -> Self {
         Self {
             kept: Vec::new(),
+            raw: HashMap::new(),
             saturated: false,
         }
     }
@@ -165,12 +169,17 @@ impl SqliteStore {
         for hit in fused.into_iter().take(q.limit) {
             let rank = |arm: usize| hit.ranks.get(arm).copied().flatten();
             if let Some(memory) = by_id.remove(&hit.id) {
+                let raw = RawRelevance {
+                    bm25: fts.raw.get(&hit.id).copied(),
+                    similarity: vec.raw.get(&hit.id).copied(),
+                };
                 hits.push(RankedHit {
                     memory,
                     score: hit.score,
                     fts_rank: rank(0),
                     vec_rank: rank(1),
                     time_rank: rank(2),
+                    raw,
                 });
             }
         }
@@ -231,12 +240,18 @@ impl SqliteStore {
         // calls give the same order.
         scored.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.id.cmp(&b.0.id)));
 
+        // FTS5's rank is minus the BM25: turned back so higher reads better.
+        let raw = scored
+            .iter()
+            .map(|(memory, rank)| (memory.id.clone(), -*rank as f32))
+            .collect();
         Ok(Arm {
             kept: scored
                 .into_iter()
                 .map(|(memory, _)| memory)
                 .filter(|memory| keep(memory))
                 .collect(),
+            raw,
             saturated,
         })
     }
@@ -269,12 +284,18 @@ impl SqliteStore {
                 .then_with(|| a.0.id.cmp(&b.0.id))
         });
 
+        let raw = scored
+            .iter()
+            .filter(|(_, similarity)| !similarity.is_nan())
+            .map(|(memory, similarity)| (memory.id.clone(), *similarity))
+            .collect();
         Ok(Arm {
             kept: scored
                 .into_iter()
                 .map(|(memory, _)| memory)
                 .filter(|memory| keep(memory))
                 .collect(),
+            raw,
             saturated,
         })
     }
@@ -595,6 +616,40 @@ mod tests {
             .search_ranked(&query("rust", Some(&empty), 10, 50), &all)
             .unwrap();
         assert_eq!(ids(&same), ids(&hits));
+    }
+
+    /// Beside the fused score, each hit carries what its arms measured
+    /// (#521): BM25 from the lexical arm (higher = better, falling with the
+    /// rank), cosine similarity from the vector arm.
+    #[test]
+    fn raw_relevance_is_what_each_arm_measured() {
+        let store = store();
+        put(&store, "both", "notes", "rust rust rust", Some(axis(0)));
+        put(&store, "lex", "notes", "rust filler filler", Some(axis(5)));
+        put(&store, "vec", "notes", "nothing in common", Some(axis(0)));
+
+        let q_emb = axis(0);
+        let hits = store
+            .search_ranked(&query("rust", Some(&q_emb), 10, 50), &all)
+            .unwrap();
+        let get = |id: &str| hits.iter().find(|h| h.memory.id == id).unwrap().raw;
+        let both = get("both");
+        let lex = get("lex");
+        assert!(both.bm25.unwrap() > lex.bm25.unwrap());
+        assert!(lex.bm25.unwrap() > 0.0);
+        assert!((both.similarity.unwrap() - 1.0).abs() < 1e-4);
+        assert!(get("vec").bm25.is_none());
+        assert!(get("vec").similarity.is_some());
+
+        // No query vector: no similarity at all.
+        let lexical = store
+            .search_ranked(&query("rust", None, 10, 50), &all)
+            .unwrap();
+        assert!(
+            lexical
+                .iter()
+                .all(|h| h.raw.similarity.is_none() && h.raw.bm25.is_some())
+        );
     }
 
     #[test]

@@ -52,6 +52,26 @@ pub struct RankedQuery<'a> {
     pub window: Option<TimeWindow>,
 }
 
+/// What each arm measured for a hit, before fusion: unlike `score`, which
+/// is normalized per query (the best hit sits near 1 whatever it is), these
+/// say whether a hit is relevant at all (#521).
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct RawRelevance {
+    /// BM25 of the lexical arm, higher = more relevant. `None` outside that
+    /// arm or on a backend that does not report it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bm25: Option<f32>,
+    /// Cosine similarity of the vector arm, in [-1, 1].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f32>,
+}
+
+impl RawRelevance {
+    pub fn is_empty(&self) -> bool {
+        self.bm25.is_none() && self.similarity.is_none()
+    }
+}
+
 /// One ranked (v2) search result, with its 1-based rank in each arm.
 #[derive(Debug, Clone)]
 pub struct RankedHit {
@@ -60,6 +80,7 @@ pub struct RankedHit {
     pub fts_rank: Option<u32>,
     pub vec_rank: Option<u32>,
     pub time_rank: Option<u32>,
+    pub raw: RawRelevance,
 }
 
 fn effective_weight(weight: f32) -> f64 {

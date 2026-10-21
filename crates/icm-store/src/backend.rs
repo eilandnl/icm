@@ -590,6 +590,7 @@ impl Store {
                 fts_rank: None,
                 vec_rank: None,
                 time_rank: None,
+                raw: icm_core::RawRelevance::default(),
             })
             .collect())
     }

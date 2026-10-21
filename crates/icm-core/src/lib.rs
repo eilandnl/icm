@@ -54,7 +54,7 @@ pub use facts_store::FactsStore;
 pub use fastembed_embedder::{DEFAULT_MODEL as DEFAULT_EMBEDDING_MODEL, FastEmbedder};
 pub use feedback::{Feedback, FeedbackStats};
 pub use feedback_store::FeedbackStore;
-pub use fusion::{FusedHit, RRF_K, RankedHit, RankedList, RankedQuery, rrf_fuse};
+pub use fusion::{FusedHit, RRF_K, RankedHit, RankedList, RankedQuery, RawRelevance, rrf_fuse};
 pub use memoir::{Concept, ConceptLink, Label, Memoir, MemoirStats, Relation};
 pub use memoir_store::MemoirStore;
 pub use memory::{

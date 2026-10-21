@@ -508,7 +508,7 @@ async fn handle_recall(
         .map_err(anyhow::Error::from)
         .and_then(|engine| run_recall_with(&state, &req, engine, format));
     match results {
-        Ok(results) => render_recall(&results, format),
+        Ok((results, raw)) => render_recall(&results, &raw, format),
         Err(e) => err_response(StatusCode::BAD_REQUEST, &e.to_string(), format),
     }
 }
@@ -521,12 +521,16 @@ fn run_recall_with(
     req: &RecallReq,
     engine: RecallEngine,
     format: OutputFormat,
-) -> Result<Vec<(Memory, Option<f32>)>> {
+) -> Result<RecallResults> {
     match engine {
-        RecallEngine::Legacy => run_recall(state, req),
+        RecallEngine::Legacy => run_recall(state, req).map(|results| (results, Vec::new())),
         RecallEngine::V2 => run_recall_v2(state, req, format),
     }
 }
+
+/// Recalled memories with their score, and what each search arm measured
+/// for them (empty on the legacy engine).
+type RecallResults = (Vec<(Memory, Option<f32>)>, Vec<icm_core::RawRelevance>);
 
 /// The renderer format behind a response format.
 fn recall_format_of(format: OutputFormat) -> RecallFormat {
@@ -549,11 +553,7 @@ const V2_MAX_LIMIT_WITH_BUDGET: usize = 500;
 /// shape: a `score` is rendered only when the server has an embedder (a
 /// keyword-only ranking has no similarity to report). Under `max_tokens`,
 /// the body rendered in `format` fits the budget.
-fn run_recall_v2(
-    state: &AppState,
-    req: &RecallReq,
-    format: OutputFormat,
-) -> Result<Vec<(Memory, Option<f32>)>> {
+fn run_recall_v2(state: &AppState, req: &RecallReq, format: OutputFormat) -> Result<RecallResults> {
     if req.query.trim().is_empty() {
         anyhow::bail!("missing required field: query");
     }
@@ -582,14 +582,14 @@ fn run_recall_v2(
     };
 
     let store = lock_store(state);
-    let outcome = request.run_with_cost(&store, state.embedder_ref(), &|m, score| {
-        crate::rendered_recall_tokens(m, with_score.then_some(score), rendered_as)
+    let outcome = request.run_with_cost(&store, state.embedder_ref(), &|m, score, raw| {
+        crate::rendered_recall_tokens_raw(m, with_score.then_some(score), raw, rendered_as)
     })?;
     Ok(outcome
         .hits
         .into_iter()
-        .map(|h| (h.memory, with_score.then_some(h.score)))
-        .collect())
+        .map(|h| ((h.memory, with_score.then_some(h.score)), h.raw))
+        .unzip())
 }
 
 /// Recall logic mirrored from `icm-mcp::tools::tool_recall` but
@@ -672,7 +672,11 @@ where
     Ok(rows.into_iter().map(|m| (m, None)).collect())
 }
 
-fn render_recall(results: &[(Memory, Option<f32>)], format: OutputFormat) -> Response {
+fn render_recall(
+    results: &[(Memory, Option<f32>)],
+    raw: &[icm_core::RawRelevance],
+    format: OutputFormat,
+) -> Response {
     if results.is_empty() {
         return text_response(MSG_NO_MEMORIES, format);
     }
@@ -685,14 +689,16 @@ fn render_recall(results: &[(Memory, Option<f32>)], format: OutputFormat) -> Res
                 format,
             ),
         },
-        OutputFormat::Json => match recall_format::render(results, RecallFormat::Json) {
-            Ok(body) => json_string_response(body),
-            Err(e) => err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("json render failed: {e}"),
-                format,
-            ),
-        },
+        OutputFormat::Json => {
+            match recall_format::render_with_raw(results, raw, RecallFormat::Json) {
+                Ok(body) => json_string_response(body),
+                Err(e) => err_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("json render failed: {e}"),
+                    format,
+                ),
+            }
+        }
     }
 }
 
@@ -748,7 +754,7 @@ async fn handle_store(
         Ok(id) => {
             let mut stored = mem;
             stored.id = id;
-            render_recall(&[(stored, None)], format)
+            render_recall(&[(stored, None)], &[], format)
         }
         Err(e) => err_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -863,7 +869,7 @@ async fn handle_consolidate(
                     .map(|m| (m, None))
                     .collect(),
             };
-            let mut resp = render_recall(&shown, format);
+            let mut resp = render_recall(&shown, &[], format);
             // Additive headers.
             for (name, value) in [
                 ("x-icm-consolidated", run.replaced),
@@ -1738,6 +1744,7 @@ mod tests {
         let got: Vec<String> =
             run_recall_with(&state, &req, RecallEngine::Legacy, OutputFormat::Json)
                 .unwrap()
+                .0
                 .into_iter()
                 .map(|(m, _)| m.id)
                 .collect();
@@ -1804,7 +1811,12 @@ mod tests {
         let legacy = json!({"query": "deploy release", "engine": "legacy"});
         let (_, v2_json) = post_recall(&state, v2.clone()).await;
         let (_, legacy_json) = post_recall(&state, legacy.clone()).await;
-        assert_eq!(keys(&v2_json), keys(&legacy_json));
+        // v2 adds what each search arm measured (#521), nothing else.
+        let v2_keys: Vec<String> = keys(&v2_json)
+            .into_iter()
+            .filter(|k| k != "bm25" && k != "similarity")
+            .collect();
+        assert_eq!(v2_keys, keys(&legacy_json));
         assert!(keys(&v2_json).contains(&"score".to_string()));
         let (_, v2_toon) = post_recall_as(&state, v2.clone(), "toon").await;
         let (_, legacy_toon) = post_recall_as(&state, legacy.clone(), "toon").await;
@@ -1828,7 +1840,12 @@ mod tests {
         let state = test_state(store, false);
         let (_, v2_json) = post_recall(&state, v2.clone()).await;
         let (_, legacy_json) = post_recall(&state, legacy.clone()).await;
-        assert_eq!(keys(&v2_json), keys(&legacy_json));
+        // v2 adds what each search arm measured (#521), nothing else.
+        let v2_keys: Vec<String> = keys(&v2_json)
+            .into_iter()
+            .filter(|k| k != "bm25" && k != "similarity")
+            .collect();
+        assert_eq!(v2_keys, keys(&legacy_json));
         assert!(!keys(&v2_json).contains(&"score".to_string()));
         let (_, v2_toon) = post_recall_as(&state, v2, "toon").await;
         let (_, legacy_toon) = post_recall_as(&state, legacy, "toon").await;

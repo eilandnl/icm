@@ -298,7 +298,7 @@ fn ranked_candidates(
         };
         // The injection is bounded in characters when rendered, not by a
         // token budget: nothing to charge.
-        let outcome = request.run_read_only(store, None, &|_, _| 0)?;
+        let outcome = request.run_read_only(store, None, &|_, _, _| 0)?;
         Ok(outcome.hits.into_iter().map(|hit| hit.memory).collect())
     };
 

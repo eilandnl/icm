@@ -1724,14 +1724,14 @@ fn tool_recall_v2(
         return ToolResult::text(no_memories(format));
     }
     let shown = |score: f32| if embedder.is_some() { score } else { -1.0 };
-    let rendered_tokens = |mem: &Memory, score: f32| {
+    let rendered_tokens = |mem: &Memory, score: f32, raw: &icm_core::RawRelevance| {
         let text = match format {
             OutputFormat::Text => {
                 let mut text = String::new();
                 push_memory_output(&mut text, mem, shown(score), compact);
                 text
             }
-            OutputFormat::Json => memory_json(mem, shown(score), None).to_string(),
+            OutputFormat::Json => with_raw(memory_json(mem, shown(score), None), raw).to_string(),
         };
         icm_core::estimate_tokens(&text)
     };
@@ -1742,12 +1742,38 @@ fn tool_recall_v2(
     if outcome.hits.is_empty() {
         return ToolResult::text(no_memories(format));
     }
+    if format == OutputFormat::Json {
+        // Beside the normalized `score`, what each arm measured (#521): a
+        // caller can tell "relevant" from "the best of what came back".
+        let records: Vec<Value> = outcome
+            .hits
+            .iter()
+            .map(|h| with_raw(memory_json(&h.memory, shown(h.score), None), &h.raw))
+            .collect();
+        return ToolResult::text(Value::Array(records).to_string());
+    }
     let scored: Vec<(Memory, f32)> = outcome
         .hits
         .into_iter()
         .map(|h| (h.memory, shown(h.score)))
         .collect();
     ToolResult::text(render_memories(&scored, compact, format))
+}
+
+/// `record` with what each search arm measured (#521), when it did.
+fn with_raw(mut record: Value, raw: &icm_core::RawRelevance) -> Value {
+    if let Some(bm25) = raw.bm25 {
+        record["bm25"] = json!(rounded(bm25));
+    }
+    if let Some(similarity) = raw.similarity {
+        record["similarity"] = json!(rounded(similarity));
+    }
+    record
+}
+
+/// Three decimals, as in the text view.
+fn rounded(v: f32) -> f64 {
+    (f64::from(v) * 1000.0).round() / 1000.0
 }
 
 /// Result cap of `icm_memory_related`, as published in its schema.
@@ -5831,6 +5857,24 @@ description = "A test project"
             other,
             hidden,
         }
+    }
+
+    /// A JSON recall gives each record the BM25 its lexical match scored,
+    /// beside the per-query `score` (#521); no embedder, no similarity.
+    #[test]
+    fn recall_json_gives_the_raw_relevance() {
+        let g = graph();
+        let result = call_tool(
+            &g.store,
+            None,
+            "icm_memory_recall",
+            &json!({"query": "sessions Redis", "project": "alpha", "format": "json"}),
+            true,
+        );
+        let records = parsed(&result);
+        let a = records.iter().find(|r| r["id"] == json!(g.a.id)).unwrap();
+        assert!(a["bm25"].as_f64().is_some_and(|b| b > 0.0), "{a}");
+        assert!(a.get("similarity").is_none(), "{a}");
     }
 
     #[test]

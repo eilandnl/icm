@@ -172,7 +172,7 @@ impl RecallRequest<'_> {
         &self,
         store: &Store,
         embedder: Option<&dyn Embedder>,
-        cost: &dyn Fn(&Memory, f32) -> usize,
+        cost: &dyn Fn(&Memory, f32, &icm_core::RawRelevance) -> usize,
     ) -> IcmResult<RecallOutcome> {
         let depth_env = std::env::var(DEPTH_ENV).ok();
         recall_with_depth(store, embedder, self, cost, depth_env.as_deref(), true)
@@ -187,7 +187,7 @@ impl RecallRequest<'_> {
         &self,
         store: &Store,
         embedder: Option<&dyn Embedder>,
-        cost: &dyn Fn(&Memory, f32) -> usize,
+        cost: &dyn Fn(&Memory, f32, &icm_core::RawRelevance) -> usize,
     ) -> IcmResult<RecallOutcome> {
         let depth_env = std::env::var(DEPTH_ENV).ok();
         recall_with_depth(store, embedder, self, cost, depth_env.as_deref(), false)
@@ -209,6 +209,9 @@ pub struct RecallHit {
     pub fts_rank: Option<u32>,
     pub vec_rank: Option<u32>,
     pub time_rank: Option<u32>,
+    /// BM25 and cosine similarity before fusion (#521); empty for a
+    /// neighbor, a substring match or a backend that does not report them.
+    pub raw: icm_core::RawRelevance,
 }
 
 /// Result of [`recall_v2`].
@@ -245,7 +248,7 @@ pub fn recall_v2(
 /// Estimated tokens of a memory as one element of a pretty-printed JSON
 /// array (every field but the embedding), plus an allowance for the score
 /// a renderer adds.
-fn full_record_cost(memory: &Memory, _score: f32) -> usize {
+fn full_record_cost(memory: &Memory, _score: f32, _raw: &icm_core::RawRelevance) -> usize {
     let mut record = memory.clone();
     record.embedding = None;
     let tokens = match serde_json::to_string_pretty(std::slice::from_ref(&record)) {
@@ -264,7 +267,7 @@ fn recall_with_depth(
     store: &Store,
     embedder: Option<&dyn Embedder>,
     req: &RecallRequest<'_>,
-    cost: &dyn Fn(&Memory, f32) -> usize,
+    cost: &dyn Fn(&Memory, f32, &icm_core::RawRelevance) -> usize,
     depth_env: Option<&str>,
     bookkeeping: bool,
 ) -> IcmResult<RecallOutcome> {
@@ -379,6 +382,7 @@ fn substring_matches(
             fts_rank: None,
             vec_rank: None,
             time_rank: None,
+            raw: icm_core::RawRelevance::default(),
         })
         .collect()
 }
@@ -402,13 +406,16 @@ fn cut(
     max_tokens: Option<usize>,
     limit: usize,
     window: Option<TimeWindow>,
-    cost: &dyn Fn(&Memory, f32) -> usize,
+    cost: &dyn Fn(&Memory, f32, &icm_core::RawRelevance) -> usize,
 ) -> RecallOutcome {
     let candidates = ranked.len();
     if max_tokens.is_none() {
         ranked.truncate(limit);
     }
-    let costs: Vec<usize> = ranked.iter().map(|h| cost(&h.memory, h.score)).collect();
+    let costs: Vec<usize> = ranked
+        .iter()
+        .map(|h| cost(&h.memory, h.score, &h.raw))
+        .collect();
 
     let (kept, used_tokens, skipped_for_budget) = match max_tokens {
         Some(budget) => {
@@ -433,6 +440,7 @@ fn cut(
                 fts_rank: hit.fts_rank,
                 vec_rank: hit.vec_rank,
                 time_rank: hit.time_rank,
+                raw: hit.raw,
             })
         })
         .collect();
@@ -463,7 +471,7 @@ fn append_neighbors(
     max_tokens: Option<usize>,
     limit: usize,
     keep: &dyn Fn(&Memory) -> bool,
-    cost: &dyn Fn(&Memory, f32) -> usize,
+    cost: &dyn Fn(&Memory, f32, &icm_core::RawRelevance) -> usize,
 ) {
     let Some(floor) = outcome.hits.last().map(|h| h.score) else {
         return;
@@ -515,7 +523,7 @@ fn append_neighbors(
             continue;
         }
         let score = (parent_score * NEIGHBOR_DISCOUNT).min(floor);
-        let est_tokens = cost(&memory, score);
+        let est_tokens = cost(&memory, score, &icm_core::RawRelevance::default());
         if let Some(left) = tokens_left.as_mut() {
             if est_tokens > *left {
                 continue;
@@ -530,6 +538,7 @@ fn append_neighbors(
             fts_rank: None,
             vec_rank: None,
             time_rank: None,
+            raw: icm_core::RawRelevance::default(),
         });
         added += 1;
     }
@@ -551,6 +560,7 @@ mod tests {
             fts_rank: Some(1),
             vec_rank: None,
             time_rank: None,
+            raw: icm_core::RawRelevance::default(),
         }
     }
 
@@ -756,7 +766,7 @@ mod tests {
     }
 
     /// A caller that renders the summary and eight tokens of framing.
-    fn summary_cost(m: &Memory, _score: f32) -> usize {
+    fn summary_cost(m: &Memory, _score: f32, _raw: &icm_core::RawRelevance) -> usize {
         estimate_tokens(&m.summary) + 8
     }
 
@@ -770,7 +780,8 @@ mod tests {
 
         // The cost sees the score the hit is rendered with.
         let ranked = vec![ranked_hit("a", 0.25), ranked_hit("b", 0.75)];
-        let by_score = |_: &Memory, score: f32| (score * 100.0) as usize;
+        let by_score =
+            |_: &Memory, score: f32, _: &icm_core::RawRelevance| (score * 100.0) as usize;
         let out = cut(ranked, None, 5, None, &by_score);
         let charged: Vec<usize> = out.hits.iter().map(|h| h.est_tokens).collect();
         assert_eq!(charged, vec![25, 75]);
@@ -836,21 +847,24 @@ mod tests {
     #[test]
     fn full_record_cost_counts_every_rendered_field() {
         let mut m = mem("errors-resolved", "short summary");
-        let bare = full_record_cost(&m, 1.0);
+        let bare = full_record_cost(&m, 1.0, &icm_core::RawRelevance::default());
         // Field names, id, three timestamps: far more than the summary.
         assert!(bare > 80, "{bare}");
 
         m.raw_excerpt = Some("e".repeat(4000));
-        let with_raw = full_record_cost(&m, 1.0);
+        let with_raw = full_record_cost(&m, 1.0, &icm_core::RawRelevance::default());
         assert!(with_raw >= bare + 990, "{with_raw} vs {bare}");
 
         m.keywords = vec!["k".repeat(400)];
-        assert!(full_record_cost(&m, 1.0) >= with_raw + 100);
+        assert!(full_record_cost(&m, 1.0, &icm_core::RawRelevance::default()) >= with_raw + 100);
 
         // The embedding is never rendered, so it is not charged.
-        let before = full_record_cost(&m, 1.0);
+        let before = full_record_cost(&m, 1.0, &icm_core::RawRelevance::default());
         m.embedding = Some(vec![0.5; 1024]);
-        assert_eq!(full_record_cost(&m, 1.0), before);
+        assert_eq!(
+            full_record_cost(&m, 1.0, &icm_core::RawRelevance::default()),
+            before
+        );
     }
 
     #[test]
@@ -941,7 +955,7 @@ mod pipeline_tests {
     }
 
     /// Every hit costs 100 tokens: makes budget arithmetic exact.
-    fn flat_cost(_: &Memory, _: f32) -> usize {
+    fn flat_cost(_: &Memory, _: f32, _: &icm_core::RawRelevance) -> usize {
         100
     }
 

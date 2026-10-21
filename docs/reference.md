@@ -290,7 +290,7 @@ memories and memoirs.
 | Tool | Description |
 |------|-------------|
 | `icm_memory_store` | Store, merging into a near-identical memory of the same topic (cosine above 0.95, with embeddings) |
-| `icm_memory_recall` | Search by query, filter by topic / keyword / project; `format: "json"` returns records with their `id` and `related_ids` |
+| `icm_memory_recall` | Search by query, filter by topic / keyword / project; `format: "json"` returns records with their `id` and `related_ids`, and on the default engine `bm25` and `similarity` (what the lexical and vector search measured, before the per-query normalization of `score`; absent when that search did not match or ran) |
 | `icm_memory_related` | List the memories linked to one memory (`id`), up to `depth` links away, within the project |
 | `icm_memory_update` | Edit a memory in-place (content, importance, keywords) |
 | `icm_memory_forget` | Delete a memory by ID |
