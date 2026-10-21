@@ -5278,7 +5278,10 @@ fn cmd_hook_prompt(
     // each full excerpt is queued as soon as the conversation has one,
     // instead of waiting for a compaction that may never come (a session
     // that crashes, or is asked about before its first compaction).
-    if std::env::var_os("ICM_WORKER").is_none()
+    // Opt-in (`[extraction] in_session`): it adds provider calls while the
+    // session runs.
+    if extraction_cfg.in_session
+        && std::env::var_os("ICM_WORKER").is_none()
         && enqueue_conversation(store, &input, extraction_cfg, "prompt", false) > 0
     {
         spawn_detached_worker(&["extract-pending", "--limit", "20"], "extraction");

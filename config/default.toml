@@ -96,6 +96,12 @@ extract_every = 3
 # net; set to `false` if you only want signal-rich extractions.
 store_raw = true
 
+# Also extract the conversation during the session (UserPromptSubmit hook):
+# each full excerpt (60,000 characters) is queued as soon as it is written,
+# instead of waiting for compaction or session end. More memories sooner,
+# at the cost of one provider call per excerpt while the session runs.
+in_session = false
+
 # LLM summarizer used by the async extraction queue (`icm extract-pending`).
 # Same keys as [consolidate.summarizer] below. Default provider: "auto".
 # [extraction.summarizer]

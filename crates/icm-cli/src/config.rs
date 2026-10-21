@@ -161,6 +161,11 @@ pub struct ExtractionConfig {
     pub extract_every: usize,
     /// Store raw text as fallback when no facts are extracted.
     pub store_raw: bool,
+    /// Also queue the conversation during the session, from the prompt
+    /// hook, as soon as a full excerpt is written (#519), instead of only
+    /// at compaction and session end. Off by default: it adds provider
+    /// calls (one per excerpt) while the session runs.
+    pub in_session: bool,
     /// LLM-backed extraction provider. When set to anything other than
     /// `none`, hooks switch to the **fast async path**: tool output is
     /// stored verbatim into a `pending_extractions` queue (~50ms / fire,
@@ -398,6 +403,7 @@ impl Default for ExtractionConfig {
             max_facts: 20,
             extract_every: 3,
             store_raw: true,
+            in_session: false,
             // Default = auto: detect an installed LLM CLI and route
             // extraction through the #219 async queue (~50ms hooks, no
             // fastembed load). `extract-pending` falls back to a batched
@@ -520,6 +526,15 @@ pub fn show_config_path() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// In-session extraction (#519) is opt-in: by default the prompt hook
+    /// queues nothing, as before.
+    #[test]
+    fn in_session_extraction_is_off_by_default() {
+        assert!(!Config::default().extraction.in_session);
+        let config: Config = toml::from_str("[extraction]\nin_session = true\n").unwrap();
+        assert!(config.extraction.in_session);
+    }
 
     #[test]
     fn test_default_config() {
