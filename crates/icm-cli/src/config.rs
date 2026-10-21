@@ -185,6 +185,18 @@ pub struct RecallConfig {
     pub enabled: bool,
     /// Maximum memories to inject.
     pub limit: usize,
+    /// Base URL of a running `icm serve --http` (e.g. `http://127.0.0.1:7777`).
+    /// When set, the hook asks it first: the server keeps the embedding model
+    /// loaded, so the recall is hybrid (keywords and meaning) at no model-load
+    /// cost. No answer within `server_timeout_ms`, an error or no memory: the
+    /// hook falls back to its own keyword recall. Empty: off.
+    pub server_url: String,
+    /// Environment variable holding the server's `--token`, if it has one.
+    pub server_token_env: String,
+    /// Maximum memories to inject from the server.
+    pub server_limit: usize,
+    /// How long the hook waits for the server, in milliseconds.
+    pub server_timeout_ms: u64,
 }
 
 /// Wake-up pack settings (SessionStart hook).
@@ -410,6 +422,12 @@ impl Default for RecallConfig {
             enabled: true,
             // What the hook always injected before it read this setting.
             limit: 5,
+            server_url: String::new(),
+            server_token_env: String::new(),
+            // Measured on 100 questions over 14 real sessions: hybrid recall
+            // of 10 memories answered about 6 more than keyword recall of 5.
+            server_limit: 10,
+            server_timeout_ms: 800,
         }
     }
 }

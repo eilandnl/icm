@@ -5248,7 +5248,27 @@ fn cmd_hook_prompt(
     // memories, `enabled = false` included. It turns off the injection
     // only; the extraction below still runs.
     if recall_cfg.enabled {
-        let ctx = extract::recall_context(store, query, project_filter, recall_cfg.limit)?;
+        let from_server = Some(recall_cfg.server_url.trim())
+            .filter(|url| !url.is_empty())
+            .and_then(|url| {
+                let token = Some(recall_cfg.server_token_env.trim())
+                    .filter(|name| !name.is_empty())
+                    .and_then(|name| std::env::var(name).ok());
+                // The whole prompt, not the 200 bytes the keyword recall
+                // takes: the meaning is in the sentence.
+                extract::recall_context_from_server(
+                    url,
+                    token.as_deref(),
+                    truncate_at_char_boundary(message, 2_000),
+                    project_filter,
+                    recall_cfg.server_limit,
+                    std::time::Duration::from_millis(recall_cfg.server_timeout_ms),
+                )
+            });
+        let ctx = match from_server {
+            Some(ctx) => ctx,
+            None => extract::recall_context(store, query, project_filter, recall_cfg.limit)?,
+        };
         if !ctx.is_empty() {
             emit_hook_context(&ctx);
         }
@@ -9281,6 +9301,10 @@ fn cmd_config(cli_db: Option<PathBuf>, cfg: &config::Config) -> Result<()> {
     println!("[recall]");
     println!("  enabled = {}", cfg.recall.enabled);
     println!("  limit = {}", cfg.recall.limit);
+    if !cfg.recall.server_url.is_empty() {
+        println!("  server_url = {}", cfg.recall.server_url);
+        println!("  server_limit = {}", cfg.recall.server_limit);
+    }
     println!();
     println!("[mcp]");
     println!("  transport = {}", cfg.mcp.transport);

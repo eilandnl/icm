@@ -155,6 +155,18 @@ enabled = true
 # Maximum memories to inject
 limit = 5
 
+# Running `icm serve --http` to ask first (e.g. "http://127.0.0.1:11435").
+# It keeps the embedding model loaded, so the hook's recall is hybrid
+# (keywords and meaning) instead of keywords only, at no model-load cost.
+# No answer within server_timeout_ms, an error or no memory: the hook uses
+# its own keyword recall. Empty: off.
+server_url = ""
+# Variable holding the server's --token, if it has one.
+server_token_env = ""
+# Maximum memories to inject from the server.
+server_limit = 10
+server_timeout_ms = 800
+
 [wakeup]
 # SessionStart hook (Layer 1): wake-up pack of critical/high-importance
 # memories injected at session start.

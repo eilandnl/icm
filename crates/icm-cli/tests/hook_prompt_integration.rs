@@ -116,3 +116,89 @@ fn hook_prompt_injects_five_memories_by_default() {
     let db = seeded(tmp.path());
     assert_eq!(injected(tmp.path(), &db, None), 5);
 }
+
+/// A running `icm serve --http` on a free loopback port, over `db`, killed
+/// on drop.
+struct Server {
+    child: std::process::Child,
+    url: String,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn serve(home: &Path, db: &str) -> Server {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+    let child = Command::new(ICM)
+        .env("HOME", home)
+        .env("ICM_NO_EMBEDDINGS", "1")
+        .env_remove("ICM_DB")
+        .env_remove("ICM_CONFIG")
+        .args(["--db", db, "serve", "--http", &addr])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn icm serve");
+    let url = format!("http://{addr}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while ureq::get(&format!("{url}/health")).call().is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "icm serve did not come up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Server { child, url }
+}
+
+/// With `server_url` set, the memories come from the running server, up to
+/// `server_limit`, not from the hook's own recall (`limit`).
+#[test]
+fn hook_prompt_recalls_through_a_running_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = seeded(tmp.path());
+    let server = serve(tmp.path(), &db);
+    let config = tmp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[recall]\nlimit = 3\nserver_url = \"{}\"\nserver_limit = 7\n",
+            server.url
+        ),
+    )
+    .unwrap();
+    assert_eq!(injected(tmp.path(), &db, Some(&config)), 7);
+}
+
+/// A server that does not answer costs at most the timeout: the hook falls
+/// back to its own recall.
+#[test]
+fn hook_prompt_falls_back_when_the_server_does_not_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = seeded(tmp.path());
+    // A bound listener that never accepts: the connection hangs, not refused.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", silent.local_addr().unwrap());
+    let config = tmp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!("[recall]\nlimit = 3\nserver_url = \"{url}\"\nserver_timeout_ms = 300\n"),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(injected(tmp.path(), &db, Some(&config)), 3);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "the hook waited {:?}",
+        started.elapsed()
+    );
+}

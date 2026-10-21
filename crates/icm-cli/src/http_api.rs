@@ -158,6 +158,10 @@ pub struct RecallReq {
     /// once (#522). `query`, when given too, is the first of them. v2 only.
     #[serde(default)]
     queries: Vec<String>,
+    /// `true`: no access recorded and no auto-decay, for a recall nobody
+    /// asked for (the prompt hook's, on every message). v2 engine only.
+    #[serde(default)]
+    read_only: bool,
     #[serde(default)]
     topic: Option<String>,
     #[serde(default)]
@@ -605,14 +609,14 @@ fn run_recall_v2(state: &AppState, req: &RecallReq, format: OutputFormat) -> Res
     };
 
     let store = lock_store(state);
-    let outcome = request.run_many_with_cost(
-        &queries[1..],
-        &store,
-        state.embedder_ref(),
-        &|m, score, raw| {
-            crate::rendered_recall_tokens_raw(m, with_score.then_some(score), raw, rendered_as)
-        },
-    )?;
+    let cost = |m: &Memory, score: f32, raw: &icm_core::RawRelevance| {
+        crate::rendered_recall_tokens_raw(m, with_score.then_some(score), raw, rendered_as)
+    };
+    let outcome = if req.read_only {
+        request.run_many_read_only(&queries[1..], &store, state.embedder_ref(), &cost)?
+    } else {
+        request.run_many_with_cost(&queries[1..], &store, state.embedder_ref(), &cost)?
+    };
     Ok(outcome
         .hits
         .into_iter()
@@ -1761,6 +1765,35 @@ mod tests {
         assert_eq!(got.len(), 3, "{body}");
         let (status, _) = post_recall(&state, json!({"queries": ["  "]})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// A read-only recall (the prompt hook's) records no access: what it
+    /// happens to surface must keep decaying. A plain recall still does.
+    #[tokio::test]
+    async fn recall_read_only_records_no_access() {
+        if !recall_env_is_clean() {
+            return;
+        }
+        let state = seeded_state();
+        let accessed = |state: &AppState, ids: &[String]| -> u32 {
+            let store = lock_store(state);
+            ids.iter()
+                .map(|id| store.get(id).unwrap().unwrap().access_count)
+                .sum()
+        };
+
+        let (_, body) = post_recall(
+            &state,
+            json!({"query": "deploy", "engine": "v2", "read_only": true}),
+        )
+        .await;
+        let hit = ids(&rows(&body));
+        assert_eq!(hit.len(), 5);
+        assert_eq!(accessed(&state, &hit), 0);
+
+        let (_, body) = post_recall(&state, json!({"query": "deploy", "engine": "v2"})).await;
+        let hit = ids(&rows(&body));
+        assert!(accessed(&state, &hit) > 0);
     }
 
     /// The legacy engine, on request, runs the pre-v2 code and returns what

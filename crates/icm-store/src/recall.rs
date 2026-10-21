@@ -225,6 +225,27 @@ impl RecallRequest<'_> {
             false,
         )
     }
+
+    /// [`Self::run_read_only`] over several queries, merged as
+    /// [`Self::run_many_with_cost`] merges them.
+    pub fn run_many_read_only(
+        &self,
+        more: &[&str],
+        store: &Store,
+        embedder: Option<&dyn Embedder>,
+        cost: &dyn Fn(&Memory, f32, &icm_core::RawRelevance) -> usize,
+    ) -> IcmResult<RecallOutcome> {
+        let depth_env = std::env::var(DEPTH_ENV).ok();
+        recall_with_depth(
+            store,
+            embedder,
+            self,
+            more,
+            cost,
+            depth_env.as_deref(),
+            false,
+        )
+    }
 }
 
 /// One returned memory.

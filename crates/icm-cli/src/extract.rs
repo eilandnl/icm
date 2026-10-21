@@ -254,6 +254,40 @@ pub fn recall_context(
     recall_context_on(store, query, project, limit, engine)
 }
 
+/// The recall context from a running `icm serve --http` at `base_url`:
+/// hybrid recall over a warm embedding model, read-only, at most `limit`
+/// memories of `project`, rendered like [`recall_context`]. `None` when the
+/// server does not answer within `timeout`, fails, or has no memory: the
+/// caller falls back to its own recall.
+pub fn recall_context_from_server(
+    base_url: &str,
+    token: Option<&str>,
+    query: &str,
+    project: Option<&str>,
+    limit: usize,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let endpoint = format!("{}/recall?format=json", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "query": query,
+        "project": project.unwrap_or(""),
+        "limit": limit,
+        "read_only": true,
+    });
+    let mut request = ureq::post(&endpoint).timeout(timeout);
+    if let Some(token) = token {
+        request = request.set("authorization", &format!("Bearer {token}"));
+    }
+    let text = request.send_json(body).ok()?.into_string().ok()?;
+    // No memory comes back as `{"message": …, "results": []}`, not an array.
+    let memories: Vec<Memory> = serde_json::from_str(&text).ok()?;
+    if memories.is_empty() {
+        return None;
+    }
+    let ctx = render_recall_context(memories);
+    (!ctx.is_empty()).then_some(ctx)
+}
+
 /// [`recall_context`] on a given engine.
 fn recall_context_on(
     store: &Store,
