@@ -656,7 +656,7 @@ Config: ~/.config/icm/config.toml (loaded)
 
 [recall]
   enabled = true
-  limit = 15
+  limit = 5
 
 [mcp]
   transport = stdio
@@ -1600,11 +1600,11 @@ min_score = 3.0
 max_facts = 10
 
 [recall]
-# Layer 2 : injection de contexte avant les sessions
+# Layer 2 : souvenirs injectes a chaque prompt (hook UserPromptSubmit)
 enabled = true
 
 # Maximum de souvenirs a injecter
-limit = 15
+limit = 5
 
 [mcp]
 # Transport du serveur MCP

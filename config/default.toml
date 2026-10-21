@@ -149,11 +149,11 @@ store_raw = true
 # workspace_id = ""
 
 [recall]
-# Layer 2: context injection before sessions
+# Layer 2: memories injected on each prompt (UserPromptSubmit hook)
 enabled = true
 
 # Maximum memories to inject
-limit = 15
+limit = 5
 
 [wakeup]
 # SessionStart hook (Layer 1): wake-up pack of critical/high-importance

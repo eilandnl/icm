@@ -3088,7 +3088,7 @@ fn main() -> Result<()> {
                     let emb_ref: Option<&dyn icm_core::Embedder> = None;
                     cmd_hook_compact(&store, emb_ref, &cfg.memory, &cfg.consolidate)
                 }
-                HookCommands::Prompt => cmd_hook_prompt(&store, &cfg.archive),
+                HookCommands::Prompt => cmd_hook_prompt(&store, &cfg.archive, &cfg.recall),
                 HookCommands::Start { max_tokens } => {
                     let tokens = if max_tokens > 0 {
                         max_tokens
@@ -5046,7 +5046,11 @@ pub(crate) fn cap_tool_output_for_inline_extraction(tool_output: &str) -> &str {
 /// UserPromptSubmit hook (Layer 2): inject recalled context at the start of each prompt.
 /// Reads JSON from stdin with `user_message`, recalls relevant memories,
 /// and prints context to stdout (Claude Code appends it as system-reminder).
-fn cmd_hook_prompt(store: &Store, archive_cfg: &crate::config::ArchiveConfig) -> Result<()> {
+fn cmd_hook_prompt(
+    store: &Store,
+    archive_cfg: &crate::config::ArchiveConfig,
+    recall_cfg: &crate::config::RecallConfig,
+) -> Result<()> {
     let Some(input) = read_stdin_utf8_lossy() else {
         return Ok(());
     };
@@ -5100,7 +5104,12 @@ fn cmd_hook_prompt(store: &Store, archive_cfg: &crate::config::ArchiveConfig) ->
     } else {
         Some(project.as_str())
     };
-    let ctx = extract::recall_context(store, query, project_filter, 5)?;
+    // `[recall]` was documented but never read: the hook always injected 5
+    // memories, `enabled = false` included.
+    if !recall_cfg.enabled {
+        return Ok(());
+    }
+    let ctx = extract::recall_context(store, query, project_filter, recall_cfg.limit)?;
     if !ctx.is_empty() {
         emit_hook_context(&ctx);
     }

@@ -175,10 +175,13 @@ pub struct ExtractionConfig {
     pub summarizer: SummarizerConfig,
 }
 
-/// Context recall/injection settings (Layer 2).
+/// Context recall/injection settings (Layer 2): the memories the
+/// UserPromptSubmit hook injects on each prompt.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct RecallConfig {
+    /// `false` stops the injection; the hook still archives the prompt and
+    /// queues conversation excerpts.
     pub enabled: bool,
     /// Maximum memories to inject.
     pub limit: usize,
@@ -405,7 +408,8 @@ impl Default for RecallConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            limit: 15,
+            // What the hook always injected before it read this setting.
+            limit: 5,
         }
     }
 }
@@ -504,7 +508,7 @@ mod tests {
         let config = Config::default();
         assert!(config.extraction.enabled);
         assert_eq!(config.memory.decay_rate, 0.95);
-        assert_eq!(config.recall.limit, 15);
+        assert_eq!(config.recall.limit, 5);
         assert!(config.mcp.compact);
     }
 
