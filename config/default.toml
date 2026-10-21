@@ -96,16 +96,27 @@ extract_every = 3
 # net; set to `false` if you only want signal-rich extractions.
 store_raw = true
 
-# Also extract the conversation during the session (UserPromptSubmit hook):
-# each full excerpt (60,000 characters) is queued as soon as it is written,
-# instead of waiting for compaction or session end. More memories sooner,
-# at the cost of one provider call per excerpt while the session runs.
-in_session = false
-
 # LLM summarizer used by the async extraction queue (`icm extract-pending`).
 # Same keys as [consolidate.summarizer] below. Default provider: "auto".
 # [extraction.summarizer]
 # provider = "auto"
+
+# LLM extraction from the conversation itself (what you and the agent
+# wrote), not only from tool output. Off by default: each excerpt is one
+# call to the extraction summarizer (needs a provider other than "none").
+[extraction.conversation]
+# At compaction and session end, queue the conversation not yet extracted.
+enabled = false
+# Also queue it during the session, on each prompt, as soon as a full
+# excerpt is written, instead of waiting for compaction.
+in_session = false
+# Characters per excerpt (one call each), excerpts kept per hook fire.
+excerpt_chars = 60000
+max_excerpts_per_fire = 12
+# Per-message caps, in characters.
+user_chars = 4000
+assistant_chars = 2000
+tool_chars = 1500
 
 # LLM summarizer used by `icm consolidate` / `consolidate-all` / `briefing`.
 # [consolidate.summarizer]

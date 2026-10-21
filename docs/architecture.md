@@ -155,7 +155,7 @@ sequenceDiagram
         A->>I: UserPromptSubmit
         I->>D: cmd_hook_prompt, recall_context<br/>recall_v2, keyword-only, read-only
         I-->>A: memories relevant to the prompt
-        I->>D: enqueue_conversation, full excerpts only
+        I->>D: [extraction.conversation] in_session:<br/>enqueue_conversation, full excerpts only
     end
 
     loop each tool call
@@ -166,16 +166,16 @@ sequenceDiagram
     end
 
     A->>I: PreCompact
-    I->>D: cmd_hook_compact: enqueue_conversation,<br/>or extract by rules when the provider is "none"
+    I->>D: cmd_hook_compact: [extraction.conversation] enabled:<br/>enqueue_conversation, otherwise extract by rules
     I-)X: detached worker: extract-pending
 
     A->>I: SessionEnd
-    I->>D: cmd_hook_end: enqueue_conversation,<br/>or extract by rules when the provider is "none"
+    I->>D: cmd_hook_end: [extraction.conversation] enabled:<br/>enqueue_conversation; extract by rules when the provider is "none"
     I-)X: detached workers: extract-pending,<br/>consolidate-pending, briefing
     X-)D: facts written as memories
 ```
 
-The workers run only when the extraction summarizer is not `none`; they are what turns the queued tool output and conversation excerpts into memories. `enqueue_conversation` reads the transcript from the byte offset it reached last time for that session (`icm_metadata`), renders what the user and the agent wrote with each tool result cut to 1,500 characters, and queues it in excerpts of up to 60,000 characters, the 12 most recent per fire; each excerpt is one provider call. With `[extraction] in_session = true` (off by default), UserPromptSubmit also queues full excerpts, as soon as the conversation has one, and leaves the rest for later; PreCompact and SessionEnd queue everything up to the end of the transcript. An excerpt the provider fails on stays queued for the next run. Each distilled fact is dated at the capture of the queue rows it came from (the latest one in its group), not at the drain, and its source is `extracted` with the project and the tools captured (`Bash`, `conversation`, …), so distilled facts are told apart from written ones. With an agent that has no SessionEnd hook, run `icm extract-pending` yourself.
+The workers run only when the extraction summarizer is not `none`; they are what turns the queued tool output and conversation excerpts into memories. Conversation excerpts are queued only with `[extraction.conversation] enabled = true` (compaction and session end) or `in_session = true` (each prompt), both off by default, and their sizes come from the same section. `enqueue_conversation` reads the transcript from the byte offset it reached last time for that session (`icm_metadata`), renders what the user and the agent wrote with each tool result cut to 1,500 characters, and queues it in excerpts of up to 60,000 characters, the 12 most recent per fire; each excerpt is one provider call. With `in_session`, UserPromptSubmit also queues full excerpts, as soon as the conversation has one, and leaves the rest for later; PreCompact and SessionEnd queue everything up to the end of the transcript. An excerpt the provider fails on stays queued for the next run. Each distilled fact is dated at the capture of the queue rows it came from (the latest one in its group), not at the drain, and its source is `extracted` with the project and the tools captured (`Bash`, `conversation`, …), so distilled facts are told apart from written ones. With an agent that has no SessionEnd hook, run `icm extract-pending` yourself.
 
 ## icm-core
 

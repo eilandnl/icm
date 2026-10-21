@@ -4638,7 +4638,8 @@ fn cmd_hook_compact(
     // the LLM, the keyword pass over the same transcript is skipped, as on
     // SessionEnd's async path: it would store the assistant's last messages
     // a second time, raw.
-    if std::env::var_os("ICM_WORKER").is_none()
+    if extraction_cfg.conversation.enabled
+        && std::env::var_os("ICM_WORKER").is_none()
         && extraction_cfg.enabled
         && extraction_cfg.summarizer.provider != "none"
     {
@@ -4703,7 +4704,8 @@ fn enqueue_conversation(
         return 0;
     };
     // A line longer than the read cap comes back as no text: skip past it.
-    let mut batch = conversation::batch(&text, start, flush);
+    let limits = extraction_cfg.conversation.limits();
+    let mut batch = conversation::batch(&text, start, flush, &limits);
     if text.is_empty() {
         batch.end = read_end;
     }
@@ -4883,7 +4885,9 @@ fn cmd_hook_end(
         && let Ok(self_path) = std::env::current_exe()
     {
         // Queued before the fork so the worker drains it in this run.
-        enqueue_conversation(store, &input, extraction_cfg, "session-end", true);
+        if extraction_cfg.conversation.enabled {
+            enqueue_conversation(store, &input, extraction_cfg, "session-end", true);
+        }
         // `nohup`-style detach: redirect std{in,out,err} to /dev/null
         // and let the child outlive us. The child reads the same
         // config so it picks up the same provider.
@@ -5278,9 +5282,9 @@ fn cmd_hook_prompt(
     // each full excerpt is queued as soon as the conversation has one,
     // instead of waiting for a compaction that may never come (a session
     // that crashes, or is asked about before its first compaction).
-    // Opt-in (`[extraction] in_session`): it adds provider calls while the
-    // session runs.
-    if extraction_cfg.in_session
+    // Opt-in (`[extraction.conversation] in_session`): it adds provider
+    // calls while the session runs.
+    if extraction_cfg.conversation.in_session
         && std::env::var_os("ICM_WORKER").is_none()
         && enqueue_conversation(store, &input, extraction_cfg, "prompt", false) > 0
     {
@@ -9286,6 +9290,16 @@ fn cmd_config(cli_db: Option<PathBuf>, cfg: &config::Config) -> Result<()> {
     println!("  max_facts = {}", cfg.extraction.max_facts);
     println!("  extract_every = {}", cfg.extraction.extract_every);
     println!("  store_raw = {}", cfg.extraction.store_raw);
+    let conv = &cfg.extraction.conversation;
+    println!();
+    println!("[extraction.conversation]");
+    println!("  enabled = {}", conv.enabled);
+    println!("  in_session = {}", conv.in_session);
+    println!("  excerpt_chars = {}", conv.excerpt_chars);
+    println!("  max_excerpts_per_fire = {}", conv.max_excerpts_per_fire);
+    println!("  user_chars = {}", conv.user_chars);
+    println!("  assistant_chars = {}", conv.assistant_chars);
+    println!("  tool_chars = {}", conv.tool_chars);
     // The summarizer sections decide whether an LLM is called and, for the
     // API-key providers, whose credit it spends — worth seeing at a glance.
     // `describe_config` reports whether the key variable is set, never its

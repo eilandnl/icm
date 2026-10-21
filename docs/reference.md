@@ -548,8 +548,8 @@ ICM captures and reinjects memories through three hooks. Capture is rule-based; 
 | Layer | Status | LLM call | Hook command | Description |
 |-------|--------|----------|-------------|-------------|
 | Layer 0 | Implemented | only with `provider = "auto"` and an LLM CLI installed | `icm hook post` | Rule-based extraction from tool output |
-| Layer 1 | Implemented | with an LLM provider (the default `auto` with a CLI installed) | `icm hook compact` | Queue the conversation since the last fire for LLM extraction before context compression; rule-based extraction from the transcript with `provider = "none"` |
-| Layer 2 | Implemented | none for the recall; with an LLM provider for the queued excerpts | `icm hook prompt` | Inject recalled memories on each user prompt; queue each full conversation excerpt (60,000 characters) for LLM extraction |
+| Layer 1 | Implemented | none; with `[extraction.conversation] enabled` and an LLM provider, one call per excerpt | `icm hook compact` | Extract from transcript before context compression; or, with `[extraction.conversation] enabled`, queue the conversation since the last fire for LLM extraction |
+| Layer 2 | Implemented | none; with `[extraction.conversation] in_session` and an LLM provider, one call per excerpt | `icm hook prompt` | Inject recalled memories on each user prompt; with `[extraction.conversation] in_session`, queue each full conversation excerpt for LLM extraction |
 
 All 3 layers are installed automatically by `icm init --mode hook`.
 

@@ -24,9 +24,31 @@ pub const MAX_EXCERPTS_PER_FIRE: usize = 12;
 
 /// Per-entry caps, in characters: what the user writes matters most, tool
 /// output least.
-const USER_CHARS: usize = 4_000;
-const ASSISTANT_CHARS: usize = 2_000;
-const TOOL_CHARS: usize = 1_500;
+pub const USER_CHARS: usize = 4_000;
+pub const ASSISTANT_CHARS: usize = 2_000;
+pub const TOOL_CHARS: usize = 1_500;
+
+/// Sizes of the rendering and the cut, from `[extraction.conversation]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub excerpt_chars: usize,
+    pub max_excerpts_per_fire: usize,
+    pub user_chars: usize,
+    pub assistant_chars: usize,
+    pub tool_chars: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            excerpt_chars: EXCERPT_CHARS,
+            max_excerpts_per_fire: MAX_EXCERPTS_PER_FIRE,
+            user_chars: USER_CHARS,
+            assistant_chars: ASSISTANT_CHARS,
+            tool_chars: TOOL_CHARS,
+        }
+    }
+}
 
 /// `icm_metadata` key holding the transcript byte offset of `session_id`
 /// up to which lines were already enqueued.
@@ -62,7 +84,7 @@ pub fn read_new_lines(path: &str, offset: u64, cap: u64) -> std::io::Result<(Str
 /// `message`), Codex (`response_item` with `payload`) and plain
 /// `{role, content}` lines are read; meta lines (`isMeta`), sidechains and
 /// anything else are skipped.
-pub fn render_entries(lines: &[&str]) -> Vec<String> {
+pub fn render_entries(lines: &[&str], limits: &Limits) -> Vec<String> {
     let mut out = Vec::new();
     for line in lines {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
@@ -91,9 +113,9 @@ pub fn render_entries(lines: &[&str]) -> Vec<String> {
             .map(|t| t.get(..16).unwrap_or(t))
             .unwrap_or("");
         let role_cap = if role == "user" {
-            USER_CHARS
+            limits.user_chars
         } else {
-            ASSISTANT_CHARS
+            limits.assistant_chars
         };
         match msg.get("content") {
             Some(Value::String(text)) => push(&mut out, ts, role, text, role_cap),
@@ -102,7 +124,7 @@ pub fn render_entries(lines: &[&str]) -> Vec<String> {
                     match block.get("type").and_then(Value::as_str) {
                         Some("tool_result") => {
                             let text = tool_result_text(block.get("content"));
-                            push(&mut out, ts, "tool", &text, TOOL_CHARS);
+                            push(&mut out, ts, "tool", &text, limits.tool_chars);
                         }
                         Some("text" | "input_text" | "output_text") => {
                             if let Some(text) = block.get("text").and_then(Value::as_str) {
@@ -150,9 +172,9 @@ pub struct Batch {
 }
 
 /// Cut `text`, complete transcript lines read from byte `start`, into
-/// excerpts of at most [`EXCERPT_CHARS`] characters, at line boundaries (a
-/// line rendering to more makes an excerpt alone), keeping the last
-/// [`MAX_EXCERPTS_PER_FIRE`].
+/// excerpts of at most `limits.excerpt_chars` characters, at line
+/// boundaries (a line rendering to more makes an excerpt alone), keeping
+/// the last `limits.max_excerpts_per_fire`.
 ///
 /// An excerpt is closed when the next line would overflow it. With `flush`
 /// the last, unfilled one is kept too, and `end` is the end of `text`:
@@ -160,7 +182,7 @@ pub struct Batch {
 /// context. Without it, the unfilled excerpt is left out and `end` stops
 /// where it would have started, so the next call reads those lines again
 /// with what follows: the in-session path, which queues full excerpts only.
-pub fn batch(text: &str, start: u64, flush: bool) -> Batch {
+pub fn batch(text: &str, start: u64, flush: bool, limits: &Limits) -> Batch {
     let mut done: Vec<String> = Vec::new();
     let mut done_end = start;
     let mut current = String::new();
@@ -169,7 +191,7 @@ pub fn batch(text: &str, start: u64, flush: bool) -> Batch {
     for line in text.split_inclusive('\n') {
         let line_start = offset;
         offset += line.len() as u64;
-        let entries = render_entries(&[line.trim_end_matches(['\n', '\r'])]);
+        let entries = render_entries(&[line.trim_end_matches(['\n', '\r'])], limits);
         if entries.is_empty() {
             if current.is_empty() {
                 // Nothing pending: the line need not be read again.
@@ -179,7 +201,7 @@ pub fn batch(text: &str, start: u64, flush: bool) -> Batch {
         }
         let block = entries.join("\n");
         let chars = block.chars().count();
-        if current_chars > 0 && current_chars + 1 + chars > EXCERPT_CHARS {
+        if current_chars > 0 && current_chars + 1 + chars > limits.excerpt_chars {
             done.push(std::mem::take(&mut current));
             current_chars = 0;
             done_end = line_start;
@@ -195,7 +217,9 @@ pub fn batch(text: &str, start: u64, flush: bool) -> Batch {
         done.push(current);
         done_end = offset;
     }
-    let skip = done.len().saturating_sub(MAX_EXCERPTS_PER_FIRE);
+    let skip = done
+        .len()
+        .saturating_sub(limits.max_excerpts_per_fire.max(1));
     Batch {
         excerpts: done.split_off(skip),
         end: done_end,
@@ -280,7 +304,7 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-10-15T08:47:40.000Z","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"3 passed"}]}]}}"#,
         ];
         assert_eq!(
-            render_entries(&lines),
+            render_entries(&lines, &Limits::default()),
             vec![
                 "[2026-10-15T08:47 user] run the tests on GKE, not on prod",
                 "[2026-10-15T08:47 assistant] Using cluster rtk-bench.",
@@ -298,7 +322,7 @@ mod tests {
             "not json",
             r#"{"type":"user","message":{"role":"user","content":"   "}}"#,
         ];
-        assert!(render_entries(&lines).is_empty());
+        assert!(render_entries(&lines, &Limits::default()).is_empty());
     }
 
     #[test]
@@ -308,7 +332,7 @@ mod tests {
             r#"{"role":"assistant","content":"ok, 8080"}"#,
         ];
         assert_eq!(
-            render_entries(&lines),
+            render_entries(&lines, &Limits::default()),
             vec!["[ user] use port 8080", "[ assistant] ok, 8080"]
         );
     }
@@ -318,7 +342,7 @@ mod tests {
         let long = "x".repeat(10_000);
         let user = format!(r#"{{"role":"user","content":"{long}"}}"#);
         let assistant = format!(r#"{{"role":"assistant","content":"{long}"}}"#);
-        let out = render_entries(&[user.as_str(), assistant.as_str()]);
+        let out = render_entries(&[user.as_str(), assistant.as_str()], &Limits::default());
         assert_eq!(out[0].chars().count(), "[ user] ".len() + USER_CHARS);
         assert_eq!(
             out[1].chars().count(),
@@ -335,7 +359,7 @@ mod tests {
     #[test]
     fn batch_respects_size_and_keeps_the_most_recent() {
         let text: String = (0..200).map(|i| user_line(i, 3_900)).collect();
-        let b = batch(&text, 0, true);
+        let b = batch(&text, 0, true, &Limits::default());
         assert_eq!(b.excerpts.len(), MAX_EXCERPTS_PER_FIRE);
         assert!(
             b.excerpts
@@ -350,7 +374,7 @@ mod tests {
     #[test]
     fn without_flush_only_full_excerpts_and_the_rest_is_read_again() {
         let text: String = (0..20).map(|i| user_line(i, 3_900)).collect();
-        let b = batch(&text, 100, false);
+        let b = batch(&text, 100, false, &Limits::default());
         assert_eq!(b.excerpts.len(), 1);
         let first = &b.excerpts[0];
         assert!(first.chars().count() <= EXCERPT_CHARS);
@@ -361,7 +385,7 @@ mod tests {
         let n_first = first.lines().count();
         assert!(rest.starts_with(&user_line(n_first, 3_900)));
         // Flushed, the rest is one more excerpt and nothing is left.
-        let tail = batch(rest, b.end, true);
+        let tail = batch(rest, b.end, true, &Limits::default());
         assert_eq!(tail.excerpts.len(), 1);
         assert!(tail.excerpts[0].contains("19:"));
         assert_eq!(tail.end, 100 + text.len() as u64);
@@ -372,7 +396,7 @@ mod tests {
         let meta = format!("{}\n", r#"{"type":"system","subtype":"compact_boundary"}"#);
         let only_meta = meta.repeat(3);
         assert_eq!(
-            batch(&only_meta, 0, false),
+            batch(&only_meta, 0, false, &Limits::default()),
             Batch {
                 excerpts: vec![],
                 end: only_meta.len() as u64
@@ -380,7 +404,7 @@ mod tests {
         );
         let pending = format!("{}{}", user_line(0, 10), meta);
         assert_eq!(
-            batch(&pending, 0, false),
+            batch(&pending, 0, false, &Limits::default()),
             Batch {
                 excerpts: vec![],
                 end: 0
@@ -398,7 +422,7 @@ mod tests {
             serde_json::json!({"role": "assistant", "content": blocks})
         );
         let text = format!("{}{}{}", user_line(0, 5), big, user_line(2, 5));
-        let b = batch(&text, 0, true);
+        let b = batch(&text, 0, true, &Limits::default());
         assert_eq!(b.excerpts.len(), 3);
         assert!(b.excerpts[1].chars().count() > EXCERPT_CHARS);
         assert!(b.excerpts[2].contains("2:"));
