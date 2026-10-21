@@ -6588,14 +6588,33 @@ description: ICM persistent memory — /{name}
             if old_js_plugin.exists() {
                 std::fs::remove_file(&old_js_plugin).ok();
             }
-            if opencode_plugin_path.exists() {
-                println!("[hook] OpenCode plugin: already configured");
-            } else {
-                std::fs::create_dir_all(&opencode_plugins_dir).ok();
-                let plugin_content = include_str!("../../../plugins/opencode-icm.ts");
-                std::fs::write(&opencode_plugin_path, plugin_content)
-                    .with_context(|| format!("cannot write {}", opencode_plugin_path.display()))?;
-                println!("[hook] OpenCode plugin: installed");
+            // OpenCode 2 does not run V1 plugins (#516): install the plugin
+            // for the OpenCode on PATH, and swap ICM's own plugin when it
+            // is the other version's.
+            let (plugin_content, api) = opencode_plugin_for(opencode_major_version());
+            let existing = std::fs::read_to_string(&opencode_plugin_path).ok();
+            match existing.as_deref() {
+                Some(current) if current == plugin_content => {
+                    println!("[hook] OpenCode plugin: already configured ({api})");
+                }
+                Some(current) if !is_icm_opencode_plugin(current) => {
+                    println!(
+                        "[hook] OpenCode plugin: {} is not ICM's, left unchanged",
+                        opencode_plugin_path.display()
+                    );
+                }
+                _ => {
+                    std::fs::create_dir_all(&opencode_plugins_dir).ok();
+                    std::fs::write(&opencode_plugin_path, plugin_content).with_context(|| {
+                        format!("cannot write {}", opencode_plugin_path.display())
+                    })?;
+                    let verb = if existing.is_some() {
+                        "updated"
+                    } else {
+                        "installed"
+                    };
+                    println!("[hook] OpenCode plugin: {verb} ({api})");
+                }
             }
         } else {
             println!("[hook] {:<16} skipped (not detected)", "OpenCode");
@@ -7071,6 +7090,46 @@ fn check_json_target(target: &DoctorTarget) -> (usize, usize) {
 
 /// OpenCode installs a TypeScript plugin instead of a JSON hook entry, so
 /// it has no command path to validate — only file existence.
+/// The ICM plugin for an OpenCode major version, and its API name: the V2
+/// plugin for OpenCode 2 and later, the V1 one otherwise (also when no
+/// `opencode` was found, as before).
+fn opencode_plugin_for(major: Option<u32>) -> (&'static str, &'static str) {
+    match major {
+        Some(m) if m >= 2 => (
+            include_str!("../../../plugins/opencode-icm-v2.ts"),
+            "V2 API",
+        ),
+        _ => (include_str!("../../../plugins/opencode-icm.ts"), "V1 API"),
+    }
+}
+
+/// Major version of the `opencode` on PATH (`opencode v2.0.29` -> 2).
+fn opencode_major_version() -> Option<u32> {
+    let out = std::process::Command::new("opencode")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    parse_major_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// First number of a version string: `opencode v2.0.29`, `1.19.3`.
+fn parse_major_version(text: &str) -> Option<u32> {
+    let start = text.find(|c: char| c.is_ascii_digit())?;
+    let digits: String = text[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Whether an `icm.ts` in OpenCode's plugin directory is one ICM wrote (V1
+/// or V2), so `icm init` may replace it.
+fn is_icm_opencode_plugin(content: &str) -> bool {
+    content.contains("export const IcmPlugin") || content.contains("id: \"icm\"")
+}
+
 fn check_opencode_plugin(home: &str) -> usize {
     let plugin = PathBuf::from(home).join(".config/opencode/plugins/icm.ts");
     if plugin.exists() {
@@ -19834,5 +19893,35 @@ mod conversation_queue_tests {
         let (stored, deleted) = extract_pending_drain_fastembed(&store, None, &pending).unwrap();
         assert_eq!((stored, deleted), (0, 1));
         assert!(store.list_pending_extractions(10).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod opencode_plugin_tests {
+    use super::*;
+
+    #[test]
+    fn the_plugin_follows_the_opencode_major_version() {
+        assert_eq!(parse_major_version("opencode v2.0.29\n"), Some(2));
+        assert_eq!(parse_major_version("1.19.3"), Some(1));
+        assert_eq!(parse_major_version("no version"), None);
+        // OpenCode 2 does not run V1 plugins (#516).
+        let (v2, api) = opencode_plugin_for(Some(2));
+        assert!(v2.contains("Plugin.define") && api == "V2 API");
+        assert!(opencode_plugin_for(Some(3)).0.contains("Plugin.define"));
+        // No opencode found, or OpenCode 1: the V1 plugin, as before.
+        for major in [None, Some(1)] {
+            let (v1, api) = opencode_plugin_for(major);
+            assert!(v1.contains("export const IcmPlugin") && api == "V1 API");
+        }
+    }
+
+    #[test]
+    fn only_icms_own_plugins_are_replaced() {
+        assert!(is_icm_opencode_plugin(opencode_plugin_for(Some(1)).0));
+        assert!(is_icm_opencode_plugin(opencode_plugin_for(Some(2)).0));
+        assert!(!is_icm_opencode_plugin(
+            "export default definePlugin({ id: \"mine\" })"
+        ));
     }
 }

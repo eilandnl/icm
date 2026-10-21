@@ -197,18 +197,18 @@ icm init --mode cli     # Injects into ~/.gemini/GEMINI.md
 
 ```bash
 icm init --mode mcp     # MCP server config
-icm init --mode hook    # Installs JS plugin with hooks
+icm init --mode hook    # Installs the TS plugin for your OpenCode version
 ```
 
 **MCP Config:** `~/.config/opencode/opencode.json` → `mcp.icm`
 
-**Plugin:** `~/.config/opencode/plugins/icm.js`
+**Plugin:** `~/.config/opencode/plugins/icm.ts`. OpenCode 2 does not run V1 plugins: `icm init` reads `opencode --version` and installs the V2 plugin (`plugins/opencode-icm-v2.ts`, `@opencode/plugin`) for OpenCode 2 and later, the V1 one (`plugins/opencode-icm.ts`) otherwise, and replaces ICM's own plugin when it is the other version's. After upgrading OpenCode to 2, run `icm init --mode hook` again.
 
-| Event | What it does |
-|-------|-------------|
-| `tool.execute.after` | Extract facts from tool output |
-| `experimental.session.compacting` | Extract before context compression |
-| `session.created` | Recall context at session start |
+| V1 hook | V2 hook | What it does |
+|---------|---------|-------------|
+| `tool.execute.after` | `ctx.tool.hook("execute.after")` | Queue tool output (and failed calls' errors) for extraction |
+| `experimental.session.compacting` | `ctx.session.hook("compaction")` | Queue the assistant's last messages before compaction |
+| `experimental.chat.system.transform` | `ctx.session.hook("context")` | Inject the wake-up pack and the project's memories (V2: on every model request, computed once per session) |
 
 ---
 
