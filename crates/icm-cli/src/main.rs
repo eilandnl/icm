@@ -9446,6 +9446,28 @@ fn group_pending_by_project(
     groups
 }
 
+/// What a group of queue rows says about the facts distilled from it: the
+/// distinct tools captured, joined by `,`, and the latest capture time (a
+/// fact cannot be traced to one row of the group).
+fn group_provenance(
+    rows: &[&icm_store::PendingRow],
+) -> (String, Option<chrono::DateTime<chrono::Utc>>) {
+    let mut tools: Vec<&str> = Vec::new();
+    let mut latest = None;
+    for row in rows {
+        if !tools.contains(&row.2.as_str()) {
+            tools.push(&row.2);
+        }
+        if let Ok(at) = chrono::DateTime::parse_from_rfc3339(&row.4) {
+            let at = at.with_timezone(&chrono::Utc);
+            if latest.is_none_or(|l| at > l) {
+                latest = Some(at);
+            }
+        }
+    }
+    (tools.join(","), latest)
+}
+
 /// A queued conversation excerpt, not a tool output.
 fn is_conversation_row(row: &icm_store::PendingRow) -> bool {
     row.2 == conversation::CONVERSATION_ROW_TOOL
@@ -9703,6 +9725,7 @@ fn drain_pending_groups(
         // Parse bullet output into individual facts, each filed under the
         // project whose rows produced it.
         let topic = format!("context-{project}");
+        let (tools, captured_at) = group_provenance(rows);
         let mut items = 0usize;
         for line in response.lines() {
             let fact = match reply_line(line) {
@@ -9715,6 +9738,18 @@ fn drain_pending_groups(
             };
             items += 1;
             let mut mem = Memory::new(topic.clone(), fact.to_string(), Importance::Medium);
+            // Dated when it was captured, not when the queue drained (#520):
+            // a backlog drained weeks later must not look fresh to the
+            // decay or the recall date arm. And marked as distilled.
+            if let Some(at) = captured_at {
+                mem.created_at = at;
+                mem.updated_at = at;
+                mem.last_accessed = at;
+            }
+            mem.source = icm_core::MemorySource::Extracted {
+                tool: tools.clone(),
+                project: project.clone(),
+            };
             // Same bug class as #394: this LLM-backed extraction path is a
             // sibling of extract_and_store_with_embedder and had the same gap
             // — the embedder was available but never attached to the Memory.
@@ -19877,6 +19912,62 @@ mod conversation_queue_tests {
                 .summary_line(3)
                 .contains("2 conversation excerpts left queued after a provider failure")
         );
+    }
+
+    /// A fact distilled weeks after its capture is dated at the capture, and
+    /// says it was distilled, from which tools, for which project (#520).
+    #[test]
+    fn distilled_facts_carry_the_capture_time_and_their_provenance() {
+        struct OneFact;
+        impl summarizer::Summarizer for OneFact {
+            fn name(&self) -> &'static str {
+                "one-fact"
+            }
+            fn summarize(&self, _: &summarizer::SummarizeRequest<'_>) -> Result<String> {
+                Ok("- billing runs on PostgreSQL 16.\n".into())
+            }
+        }
+        let store = Store::in_memory().unwrap();
+        let row = |id: &str, tool: &str, at: &str| -> icm_store::PendingRow {
+            (
+                id.into(),
+                "billing".into(),
+                tool.into(),
+                "raw".into(),
+                at.into(),
+            )
+        };
+        let pending = vec![
+            row("1", "Bash", "2026-09-01T10:00:00+00:00"),
+            row("2", "Read", "2026-09-02T08:30:00+00:00"),
+            row("3", "Bash", "2026-09-01T12:00:00+00:00"),
+        ];
+        let groups = group_pending_by_project(&pending);
+        let mut tally = DrainTally::default();
+        drain_pending_groups(
+            &store,
+            None,
+            &OneFact,
+            None,
+            256,
+            std::time::Duration::from_secs(5),
+            &groups,
+            &mut tally,
+        )
+        .unwrap();
+
+        let stored = store.get_by_topic("context-billing").unwrap();
+        assert_eq!(stored.len(), 1);
+        let m = &stored[0];
+        assert_eq!(m.created_at.to_rfc3339(), "2026-09-02T08:30:00+00:00");
+        assert_eq!(m.last_accessed, m.created_at);
+        match &m.source {
+            icm_core::MemorySource::Extracted { tool, project } => {
+                assert_eq!(tool, "Bash,Read");
+                assert_eq!(project, "billing");
+            }
+            other => panic!("expected an extracted source, got {other:?}"),
+        }
     }
 
     #[test]

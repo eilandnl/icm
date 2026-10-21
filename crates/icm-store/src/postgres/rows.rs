@@ -16,6 +16,7 @@ pub(crate) fn source_type(source: &MemorySource) -> &'static str {
     match source {
         MemorySource::ClaudeCode { .. } => "claude_code",
         MemorySource::Conversation { .. } => "conversation",
+        MemorySource::Extracted { .. } => "extracted",
         MemorySource::Manual => "manual",
     }
 }

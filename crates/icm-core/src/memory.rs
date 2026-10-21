@@ -166,6 +166,13 @@ pub enum MemorySource {
     Conversation {
         thread_id: String,
     },
+    /// Distilled by `extract-pending` from queued captures of `project`:
+    /// `tool` names what was captured (`Bash`, `Read`, … or `conversation`
+    /// for a conversation excerpt), several joined by `,`.
+    Extracted {
+        tool: String,
+        project: String,
+    },
     Manual,
 }
 
@@ -174,6 +181,7 @@ impl fmt::Display for MemorySource {
         match self {
             Self::ClaudeCode { session_id, .. } => write!(f, "claude-code:{session_id}"),
             Self::Conversation { thread_id } => write!(f, "conversation:{thread_id}"),
+            Self::Extracted { tool, project } => write!(f, "extracted:{project}:{tool}"),
             Self::Manual => write!(f, "manual"),
         }
     }
