@@ -25,6 +25,8 @@ mod import;
 mod install_manifest;
 #[cfg(test)]
 mod learn_tests;
+#[cfg(feature = "http-api")]
+mod tls;
 // First-launch onnxruntime resolution for the load-dynamic embeddings build
 // (issue #345). Only the dynamic build needs a runtime downloaded at execution
 // time; the static build links onnxruntime in.
@@ -910,6 +912,13 @@ enum Commands {
         #[cfg(feature = "http-api")]
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
+
+        /// Serve `--http` over HTTPS, as `[http.tls] enabled = true` does:
+        /// the certificate set in `[http.tls]`, else `cert.pem` + `key.pem`
+        /// in its `dir`, else a self-signed one generated there.
+        #[cfg(feature = "http-api")]
+        #[arg(long, requires = "http")]
+        tls: bool,
     },
 
     /// Hook handlers shared across Claude Code, Codex, Gemini, and
@@ -3010,6 +3019,8 @@ fn main() -> Result<()> {
                 http_proxy: _,
             #[cfg(feature = "http-api")]
             token,
+            #[cfg(feature = "http-api")]
+            tls,
         } => {
             #[cfg(feature = "web")]
             if expose {
@@ -3027,6 +3038,11 @@ fn main() -> Result<()> {
             // stdio, so it's an `if let`, not an `else if expose`.
             #[cfg(feature = "http-api")]
             if let Some(addr) = http {
+                let tls = if tls || cfg.http.tls.enabled {
+                    Some(tls::resolve(&cfg.http.tls, tls::default_dir())?)
+                } else {
+                    None
+                };
                 let boxed_emb: Option<Box<dyn icm_core::Embedder + Send + Sync>> =
                     embedder.map(|e| Box::new(e) as Box<dyn icm_core::Embedder + Send + Sync>);
                 let auto_consolidate = icm_mcp::AutoConsolidate {
@@ -3041,6 +3057,7 @@ fn main() -> Result<()> {
                     token,
                     auto_consolidate,
                     cfg.mcp.instructions.clone(),
+                    tls,
                 );
             }
             #[cfg(feature = "embeddings")]

@@ -251,6 +251,7 @@ pub async fn run_http_server(
     token: Option<String>,
     auto_consolidate: icm_mcp::AutoConsolidate,
     mcp_instructions: Option<String>,
+    tls: Option<crate::tls::TlsFiles>,
 ) -> Result<()> {
     // A non-loopback bind with no token exposes the full memory store —
     // recall, store, consolidate — to anyone who can reach the interface,
@@ -283,6 +284,9 @@ pub async fn run_http_server(
         ))
         .with_state(state);
 
+    if let Some(tls) = tls {
+        return serve_https(app, addr, &tls).await;
+    }
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("failed to bind {addr}: {e}"))?;
@@ -290,6 +294,36 @@ pub async fn run_http_server(
     eprintln!("[icm http] listening on http://{local}");
 
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// The same router over TLS (`[http.tls]`), with rustls on ring.
+async fn serve_https(app: Router, addr: SocketAddr, tls: &crate::tls::TlsFiles) -> Result<()> {
+    // Another part of the process may have installed a provider already.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "[http.tls]: loading {} / {}: {e}",
+                tls.cert.display(),
+                tls.key.display()
+            )
+        })?;
+    if tls.generated {
+        eprintln!(
+            "[icm http] generated a self-signed certificate: {} (clients must trust it)",
+            tls.cert.display()
+        );
+    }
+    eprintln!(
+        "[icm http] listening on https://{addr} (certificate {})",
+        tls.cert.display()
+    );
+    axum_server::bind_rustls(addr, config)
+        .serve(app.into_make_service())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to serve https on {addr}: {e}"))?;
     Ok(())
 }
 
