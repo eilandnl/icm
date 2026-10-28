@@ -92,9 +92,14 @@ pub fn resolve(cfg: &TlsConfig, default_dir: Option<PathBuf>) -> Result<TlsFiles
     }
 }
 
+/// Days a generated certificate is valid: long enough not to bother a
+/// local setup, short enough that a leaked key does not live forever.
+const SELF_SIGNED_DAYS: i64 = 730;
+
 /// Write a self-signed `cert.pem` + `key.pem` for `localhost`, the loopback
 /// addresses and `names` into `dir` (the key readable by the owner only).
 fn generate(dir: &Path, names: &[String]) -> Result<()> {
+    use chrono::Datelike;
     let mut all: Vec<String> = LOCAL_NAMES.iter().map(|s| s.to_string()).collect();
     for name in names {
         let name = name.trim();
@@ -102,19 +107,33 @@ fn generate(dir: &Path, names: &[String]) -> Result<()> {
             all.push(name.to_string());
         }
     }
-    let pair = rcgen::generate_simple_self_signed(all)
+    let mut params = rcgen::CertificateParams::new(all)
+        .context("[http.tls]: invalid name for the self-signed certificate")?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "icm");
+    let day = |d: chrono::DateTime<chrono::Utc>| {
+        rcgen::date_time_ymd(d.year(), d.month() as u8, d.day() as u8)
+    };
+    let now = chrono::Utc::now();
+    params.not_before = day(now - chrono::Duration::days(1));
+    params.not_after = day(now + chrono::Duration::days(SELF_SIGNED_DAYS));
+    let key = rcgen::KeyPair::generate().context("[http.tls]: generating a key")?;
+    let cert = params
+        .self_signed(&key)
         .context("[http.tls]: generating a self-signed certificate")?;
     create_private_dir(dir)?;
-    write_private(
-        &dir.join("key.pem"),
-        pair.key_pair.serialize_pem().as_bytes(),
-    )?;
-    std::fs::write(dir.join("cert.pem"), pair.cert.pem())
-        .with_context(|| format!("writing {}", dir.join("cert.pem").display()))?;
+    write_new(&dir.join("key.pem"), key.serialize_pem().as_bytes(), 0o600)?;
+    write_new(&dir.join("cert.pem"), cert.pem().as_bytes(), 0o644)?;
     Ok(())
 }
 
+/// Create `dir` readable by the owner only. A directory that already exists
+/// keeps its mode: `dir = "~"` must not lock the home directory.
 fn create_private_dir(dir: &Path) -> Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     #[cfg(unix)]
     {
@@ -125,14 +144,15 @@ fn create_private_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Write a file that must not exist yet (no following a planted link).
+fn write_new(path: &Path, bytes: &[u8], #[allow(unused_variables)] mode: u32) -> Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(mode);
     }
     let mut file = options
         .open(path)

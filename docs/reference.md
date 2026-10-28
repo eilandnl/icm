@@ -209,12 +209,27 @@ enabled = true
 ```
 
 ```bash
-icm serve --http 0.0.0.0:11435 --token "$ICM_TOKEN" --tls
+ICM_HTTP_TOKEN="$(cat ~/.config/icm/http-token)" icm serve --http 0.0.0.0:11435 --tls
 # Generated certificate, Linux default data dir:
 curl --cacert ~/.local/share/icm/tls/cert.pem https://localhost:11435/health
 ```
 
-A generated certificate is not trusted by clients until you give them `cert.pem` (`curl --cacert`, or add it to the system store). The private key is written with mode 0600. A non-loopback bind still requires `--token`.
+A generated certificate (CN `icm`, valid two years) is not trusted by clients until you give them `cert.pem` (`curl --cacert`, or add it to the system store). The private key is written with mode 0600.
+
+### Exposing the server
+
+A non-loopback bind requires a token of at least 32 characters (`openssl rand -hex 32`). Give it through `$ICM_HTTP_TOKEN` or `[http] token_file` rather than `--token`, which shows in `ps`. Without TLS on such a bind, icm warns that the token travels in clear text.
+
+```toml
+[http]
+token_file = "~/.config/icm/http-token"  # first line; --token and $ICM_HTTP_TOKEN win
+mcp = true                  # false: no POST /mcp, only the REST routes
+request_timeout_secs = 60   # a request (body read included) gets 408 after this
+header_timeout_secs = 10    # a connection that has not sent its headers is closed
+max_concurrent = 32         # requests at once; more get 503
+```
+
+One token gives full read and write access to the store, `/mcp` included: serve a dedicated database (`--db`) when the callers should not see your own memories. Over a non-loopback bind, `icm_learn` (it scans a server directory) is refused. Without a token, only a local `Host` (`localhost`, `127.0.0.1`, `[::1]`) is served, so a web page cannot reach the API through DNS rebinding. `POST /store` takes a `raw` excerpt of at most 64 KB, as `content`.
 
 `/recall` takes `"read_only": true` to record no access and apply no decay (what the prompt hook sends: a recall nobody asked for must not count as a use).
 
