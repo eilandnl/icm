@@ -130,8 +130,13 @@ and PostgreSQL rejects a vector of the wrong size with its own error.
   of 7,788 memories, a query made of a memory's five rarest words found
   that memory first in 94% of cases against 96% on SQLite, with the same top
   result in 97% of queries; a query made of its keywords found it first in
-  70% against 63%. It was not measured with embeddings, on other corpora, or
-  with a vector index larger than a few thousand rows.
+  70% against 63%. With embeddings (a small model, 40 memories, 20
+  paraphrase queries) both backends returned the same top result for all 20.
+  It was not measured on other corpora, or with a vector index larger than a
+  few thousand rows.
+- **Versions.** The Postgres tests pass on PostgreSQL 15, 16 and 17 with
+  pgvector 0.6.0 and 0.8.7; CI runs `pgvector/pgvector:pg16`. `icm embed
+  --migrate` was run end to end: reset, re-embed, and recall unchanged.
 
 ## Requirements
 
