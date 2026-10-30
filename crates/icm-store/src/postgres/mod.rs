@@ -64,18 +64,6 @@ pub struct PostgresStore {
     readonly: bool,
 }
 
-/// One-shot warning that auto-consolidation silently does nothing on this
-/// backend (see [`PostgresStore::auto_consolidate`]).
-fn warn_auto_consolidate_unsupported() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "auto-consolidation is not implemented on the PostgreSQL backend; \
-             topics will keep growing (auto_consolidate_enabled has no effect here)"
-        );
-    });
-}
-
 fn unsupported<T>(op: &str) -> IcmResult<T> {
     Err(IcmError::Unsupported(format!(
         "{op} (use the default SQLite backend)"

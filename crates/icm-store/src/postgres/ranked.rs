@@ -386,26 +386,8 @@ mod tests {
         assert_eq!(lexical_query(""), "");
     }
 
-    /// A store in a fresh database of the server named by
-    /// `ICM_POSTGRES_TEST_URL` (`postgres://user@host:port/db`, a role
-    /// that may create databases and the pgvector extension), or `None` to
-    /// skip when it is not set. One database per test: the schema setup
-    /// looks indexes up by name, so tests cannot share a database.
     fn store(name: &str) -> Option<PostgresStore> {
-        let base = std::env::var("ICM_POSTGRES_TEST_URL").ok()?;
-        let (server, _) = base.rsplit_once('/').expect("URL ends in /<database>");
-        let database = format!("icm_test_{name}");
-        let mut admin = Client::connect(&base, NoTls).expect("connect to test server");
-        for statement in [
-            format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)"),
-            format!("CREATE DATABASE {database}"),
-        ] {
-            admin
-                .batch_execute(&statement)
-                .expect("reset test database");
-        }
-        let url = format!("{server}/{database}");
-        Some(PostgresStore::connect_url(&url, DIMS, false).expect("open test store"))
+        crate::postgres::tests::live_store(name, DIMS)
     }
 
     /// Unit vector on `axis`.

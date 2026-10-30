@@ -30,6 +30,9 @@ that benefits from being shared:
   (pgvector's `hnsw.ef_search` ceiling), and an HNSW scan is approximate
 - `list`, `topics`, `stats`, `health`
 - temporal `decay` (access-aware) and `prune`
+- auto-consolidation (`[memory] auto_consolidate_enabled`): the same
+  lossy rollup as SQLite, safe for concurrent writers because it replaces
+  only the memories it read
 - the ancillary tables used by the normal store/recall/hook path:
   hook telemetry, the async extraction queue, code areas, and the
   key/value metadata.
@@ -90,12 +93,12 @@ icm stats
 # Integration tests (skipped automatically when the env var is unset):
 cargo test -p icm-store --no-default-features --features postgres -- --test-threads=1
 
-# Ranked-search tests: each one creates its own database on this server, so
-# the role needs CREATEDB and a separate variable guards against pointing
-# them at a database you care about.
+# Store tests (ranked search, auto-consolidation): each one creates its own
+# database on this server, so the role needs CREATEDB and a separate
+# variable guards against pointing them at a database you care about.
 ICM_POSTGRES_TEST_URL="postgres://icm:icm@127.0.0.1:55432/icm" \
     cargo test -p icm-store --no-default-features --features postgres \
-    --lib postgres::ranked -- --test-threads=1
+    --lib postgres:: -- --test-threads=1
 ```
 
 ## Kubernetes

@@ -127,26 +127,91 @@ impl PostgresStore {
 
     // Consolidation / patterns
 
-    /// Auto-consolidation is not yet implemented on the PostgreSQL
-    /// backend; the call is a no-op (returns "did not consolidate") so the
-    /// normal store path is unaffected. Unlike the other parity gaps (which
-    /// return `Unsupported`), this one is silent by design — but the user
-    /// deserves to know their `auto_consolidate_enabled = true` does nothing
-    /// here, so warn once per process (audit finding).
-    pub fn auto_consolidate(&self, _topic: &str, _threshold: usize) -> IcmResult<bool> {
-        warn_auto_consolidate_unsupported();
-        Ok(false)
+    /// Consolidate a topic once it holds `threshold` non-`critical`
+    /// memories: keep the 3 heaviest summaries, merge every keyword, and
+    /// replace the memories that were read with that one rollup. Returns
+    /// `true` if it consolidated. Mirrors `SqliteStore::auto_consolidate`,
+    /// including being lossy by design (off by default).
+    pub fn auto_consolidate(&self, topic: &str, threshold: usize) -> IcmResult<bool> {
+        self.auto_consolidate_with_embedder(topic, threshold, None)
     }
 
-    /// See [`Self::auto_consolidate`].
+    /// Same as [`Self::auto_consolidate`], and embeds the rollup when an
+    /// embedder is available so vector recall finds it right away.
     pub fn auto_consolidate_with_embedder(
         &self,
-        _topic: &str,
-        _threshold: usize,
-        _embedder: Option<&dyn Embedder>,
+        topic: &str,
+        threshold: usize,
+        embedder: Option<&dyn Embedder>,
     ) -> IcmResult<bool> {
-        warn_auto_consolidate_unsupported();
-        Ok(false)
+        if self.count_by_topic(topic)? < threshold {
+            return Ok(false);
+        }
+
+        // `critical` memories are exempt from consolidation, so they
+        // neither count toward the threshold nor feed the rollup.
+        let mut memories = self.get_by_topic(topic)?;
+        memories.retain(|m| !matches!(m.importance, Importance::Critical));
+        if memories.is_empty() || memories.len() < threshold {
+            return Ok(false);
+        }
+        memories.sort_by(|a, b| {
+            b.weight
+                .partial_cmp(&a.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut summary = memories
+            .iter()
+            .take(3)
+            .map(|m| m.summary.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        // The rollup goes through the same size check as any write.
+        if summary.len() > MAX_SUMMARY_BYTES {
+            let mut cut = MAX_SUMMARY_BYTES;
+            while !summary.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            summary.truncate(cut);
+        }
+
+        let mut keywords: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for keyword in memories.iter().flat_map(|m| &m.keywords) {
+            if seen.insert(keyword.to_lowercase()) {
+                keywords.push(keyword.clone());
+            }
+        }
+
+        // The rollup stands for the memories read here and only those: one
+        // stored since, or past the 500-row read, must not go with them.
+        let replaced: Vec<icm_core::ReadMemory> =
+            memories.iter().map(icm_core::ReadMemory::from).collect();
+
+        let mut consolidated = Memory::new(topic.into(), summary, Importance::High);
+        consolidated.keywords = keywords;
+        consolidated.raw_excerpt = Some(format!(
+            "auto-consolidated from {} memories",
+            memories.len()
+        ));
+        consolidated.weight = 1.0;
+
+        // An embedder failure costs the rollup its vector, not the rollup.
+        if let Some(embedder) = embedder {
+            match embedder.embed(&consolidated.embed_text()) {
+                Ok(embedding) => consolidated.embedding = Some(embedding),
+                Err(e) => tracing::warn!(
+                    "auto-consolidate: embedding failed for topic '{topic}': {e}; \
+                     consolidated memory will lack vector representation"
+                ),
+            }
+        }
+
+        // `Stale` (a memory changed since the read) writes nothing; the
+        // next store tries again.
+        let outcome = self.consolidate_ids(topic, &replaced, consolidated)?;
+        Ok(matches!(outcome, icm_core::Consolidated::Replaced { .. }))
     }
 
     /// Pattern mining is not yet available on the PostgreSQL backend.

@@ -269,7 +269,7 @@ jobs:
           if grep -q "skipping: ICM_POSTGRES_URL not set" pg.log; then
             echo "FAIL: tests skipped despite the service container"; exit 1
           fi
-      - name: Run postgres ranked-search tests
+      - name: Run postgres store tests (database per test)
         env:
           # Each test creates its own database on this server.
           ICM_POSTGRES_TEST_URL: postgres://icm:icm@127.0.0.1:55432/icm
@@ -277,7 +277,7 @@ jobs:
           # --test-threads=1: concurrent CREATE DATABASE from template1 can
           # fail while another session holds it.
           cargo test -p icm-store --no-default-features --features postgres \
-            --lib postgres::ranked -- --test-threads=1
+            --lib postgres:: -- --test-threads=1
 
   security:
     name: security scan
