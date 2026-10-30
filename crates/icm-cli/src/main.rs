@@ -7868,6 +7868,25 @@ fn embedding_status_lines_for(
 /// Tolerant of every failure mode: a missing DB, a non-SQLite backend, or an
 /// unreadable file are all reported rather than propagated.
 fn report_db_integrity(db_path: &std::path::Path) {
+    if is_postgres_backend() {
+        match Store::open_maintenance(db_path).and_then(|store| store.integrity_check()) {
+            Ok(rows) if integrity_is_ok(&rows) => {
+                println!("Database integrity: ok (PostgreSQL schema).");
+            }
+            Ok(rows) => {
+                println!(
+                    "Database integrity: DEGRADED — {} problem(s) in the PostgreSQL schema:",
+                    rows.len()
+                );
+                for line in rows.iter().take(8) {
+                    println!("  - {line}");
+                }
+                println!("To attempt recovery: icm repair");
+            }
+            Err(e) => println!("Database integrity: could not check PostgreSQL: {e}"),
+        }
+        return;
+    }
     if !db_path.exists() {
         println!(
             "Database: none yet at {} (nothing to check).",
@@ -8338,8 +8357,71 @@ fn backup_db(db_path: &std::path::Path) -> Result<PathBuf> {
     Ok(backup)
 }
 
+/// Whether `ICM_DB_BACKEND` selects PostgreSQL: a database server, not a file,
+/// so there is no file to look for, copy or salvage.
+fn is_postgres_backend() -> bool {
+    matches!(
+        icm_store::BackendKind::from_env(),
+        Ok(icm_store::BackendKind::Postgres)
+    )
+}
+
+/// `integrity_check` rows meaning "no problem".
+fn integrity_is_ok(rows: &[String]) -> bool {
+    rows.len() == 1 && rows[0] == "ok"
+}
+
+/// `icm repair` on PostgreSQL: report what is missing or invalid in the
+/// schema, recreate it and rebuild the search indexes. No file is copied;
+/// nothing the repair does changes stored data.
+fn cmd_repair_postgres(dry_run: bool) -> Result<()> {
+    let store = Store::open_maintenance(std::path::Path::new(""))
+        .context("opening the PostgreSQL database for repair")?;
+    let before = store.integrity_check()?;
+    if integrity_is_ok(&before) {
+        println!("integrity_check: ok — the PostgreSQL schema is healthy, nothing to repair.");
+        return Ok(());
+    }
+    println!("integrity_check reported {} problem(s):", before.len());
+    for line in before.iter().take(8) {
+        println!("  - {line}");
+    }
+    if before.len() > 8 {
+        println!("  … and {} more", before.len() - 8);
+    }
+    if dry_run {
+        println!("\n(dry run) Would recreate what is missing and REINDEX the search indexes.");
+        return Ok(());
+    }
+
+    println!(
+        "\nRecreating what is missing and rebuilding the search indexes (no file is copied: \
+         this does not change stored data)…"
+    );
+    let rebuilt = store.rebuild_search_indexes()?;
+    println!("Rebuilt: {}", rebuilt.join(", "));
+
+    let after = store.integrity_check()?;
+    if integrity_is_ok(&after) {
+        println!("\n✔ Repair succeeded: integrity_check is now ok.");
+        return Ok(());
+    }
+    println!(
+        "\n✗ {} problem(s) remain, which the rebuild cannot fix:",
+        after.len()
+    );
+    for line in after.iter().take(8) {
+        println!("  - {line}");
+    }
+    // Non-zero exit so scripts/automation can detect a partial repair.
+    std::process::exit(1);
+}
+
 /// `icm repair` — recover a corrupt SQLite memory DB (issue #313).
 fn cmd_repair(db_path: &std::path::Path, dry_run: bool) -> Result<()> {
+    if is_postgres_backend() {
+        return cmd_repair_postgres(dry_run);
+    }
     if !db_path.exists() {
         println!("No database at {} — nothing to repair.", db_path.display());
         return Ok(());
@@ -11608,18 +11690,28 @@ fn cmd_embed_migrate(
         );
     }
 
-    // Not `.backup-*`: the auto-backup rotation would eventually delete it.
-    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let mut backup_name = db_path
-        .file_name()
-        .map(|s| s.to_os_string())
-        .unwrap_or_else(|| std::ffi::OsString::from("memories.db"));
-    backup_name.push(format!(".pre-embed-migrate-{ts}"));
-    let backup = db_path.with_file_name(&backup_name);
-    store
-        .backup_to(&backup)
-        .with_context(|| format!("backup to {}; nothing was changed", backup.display()))?;
-    println!("Backup written to {}", backup.display());
+    if is_postgres_backend() {
+        // A database server has no file to copy. The vectors are derived data
+        // that `icm embed` computes again; keep a snapshot if the old ones
+        // matter.
+        println!(
+            "No file backup on PostgreSQL: the stored vectors are discarded. Take a database \
+             snapshot first if you need to keep them."
+        );
+    } else {
+        // Not `.backup-*`: the auto-backup rotation would eventually delete it.
+        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let mut backup_name = db_path
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("memories.db"));
+        backup_name.push(format!(".pre-embed-migrate-{ts}"));
+        let backup = db_path.with_file_name(&backup_name);
+        store
+            .backup_to(&backup)
+            .with_context(|| format!("backup to {}; nothing was changed", backup.display()))?;
+        println!("Backup written to {}", backup.display());
+    }
 
     // One transaction empties the index and records the new model: a
     // process starting from here on sees whose index it is.

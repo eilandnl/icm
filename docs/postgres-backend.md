@@ -65,21 +65,34 @@ that benefits from being shared:
 
 ## What stays SQLite-only
 
-These act on the SQLite file itself, and PostgreSQL has its own tools for
-each: the integrity check (`PRAGMA integrity_check`), rebuilding the search
-indexes (`REINDEX`) and the file backup and its rotation (`pg_dump`). They
-return an error on PostgreSQL.
+The file backup and its rotation copy the SQLite file, so on PostgreSQL the
+automatic backup does not run and `icm repair` does not take a copy. Back
+the database up with `pg_dump`, point-in-time recovery or your platform's
+snapshots.
+
+## Integrity check and repair
+
+`icm repair` checks what ICM depends on: that its tables and indexes exist
+and are valid (an index left invalid by a failed `CREATE INDEX
+CONCURRENTLY` is reported), and that the recorded `embedding_dims` is the
+size the vector columns have. It does not look for damage in PostgreSQL's
+own pages, which its write-ahead log and checksums guard. The repair
+recreates whatever is missing and runs `REINDEX` on the tables with a
+search index; it does not touch the data. Opening for the check does not
+run the usual schema migration, since that would recreate the things the
+check is looking for.
 
 ## Changing the embedding model
 
 The `vector(N)` columns are sized when the database is created, and the
 stored size wins over what a later run asks for. To move to a model with
-another dimension, reset the vector index: it clears every stored vector
-(they are derived data), resizes the vector columns of `memories` and
-`feedback`, recreates the HNSW index and records the new size and model, in
-one transaction. Then `icm embed` computes the vectors again. Take a
-database snapshot first (`pg_dump`, or your platform's), since the reset
-discards the old vectors.
+another dimension, configure the new model and run `icm embed --migrate`.
+It clears every stored vector (they are derived data), resizes the vector
+columns of `memories` and `feedback`, recreates the HNSW index, records the
+new size and model, all in one transaction, and then computes the vectors
+again; an interrupted run is resumed by a plain `icm embed`. It takes no
+file backup on PostgreSQL, so take a database snapshot first (`pg_dump`,
+or your platform's) if you want to keep the old vectors.
 
 Other ICM processes keep checking against the old size until they restart,
 and PostgreSQL rejects a vector of the wrong size with its own error.
