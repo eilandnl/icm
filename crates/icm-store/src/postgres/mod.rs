@@ -71,6 +71,7 @@ mod connection;
 mod facts;
 mod feedback;
 mod hooks;
+mod integrity;
 mod maintenance;
 mod memoir;
 mod memory;

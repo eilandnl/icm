@@ -185,9 +185,9 @@ impl Store {
         }
     }
 
-    /// Open the local SQLite database for maintenance — integrity check and
-    /// repair (issue #313). Only the SQLite backend has an on-disk file to
-    /// inspect; Postgres / OpenSearch have their own durability and return a
+    /// Open the database for maintenance — integrity check and repair
+    /// (issue #313). SQLite inspects its file; PostgreSQL its schema, without
+    /// migrating it first. OpenSearch has nothing to check and returns a
     /// config error.
     pub fn open_maintenance(path: &Path) -> IcmResult<Self> {
         match BackendKind::from_env()? {
@@ -202,26 +202,41 @@ impl Store {
                     Err(not_compiled("sqlite"))
                 }
             }
-            other => {
+            BackendKind::Postgres => {
+                #[cfg(feature = "postgres")]
+                {
+                    Ok(Store::Postgres(PostgresStore::open_maintenance(path)?))
+                }
+                #[cfg(not(feature = "postgres"))]
+                {
+                    let _ = path;
+                    Err(not_compiled("postgres"))
+                }
+            }
+            BackendKind::OpenSearch => {
                 let _ = path;
-                Err(IcmError::Config(format!(
-                    "`icm repair` / integrity check only applies to the SQLite \
-                     backend, but ICM_DB_BACKEND selects {other:?}"
-                )))
+                Err(IcmError::Config(
+                    "`icm repair` / integrity check applies to the SQLite and PostgreSQL \
+                     backends, but ICM_DB_BACKEND selects OpenSearch"
+                        .into(),
+                ))
             }
         }
     }
 
-    /// Run `PRAGMA integrity_check` on the SQLite backend (issue #313).
-    /// A healthy DB returns `["ok"]`. Only meaningful on a store opened via
-    /// [`Self::open_maintenance`]; other backends return a config error.
+    /// Run `PRAGMA integrity_check` on the SQLite backend, or the schema
+    /// check on PostgreSQL (issue #313). A healthy DB returns `["ok"]`. Only
+    /// meaningful on a store opened via [`Self::open_maintenance`]; OpenSearch
+    /// returns a config error.
     pub fn integrity_check(&self) -> IcmResult<Vec<String>> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.integrity_check(),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.integrity_check(),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "integrity_check is only supported on the SQLite backend".into(),
+                "integrity_check is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
@@ -232,23 +247,28 @@ impl Store {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.integrity_check_structural(),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.integrity_check_structural(),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "integrity_check is only supported on the SQLite backend".into(),
+                "integrity_check is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
 
-    /// Rebuild FTS shadow tables and `REINDEX` on the SQLite backend
-    /// (issue #313). Returns the FTS tables rebuilt. Other backends return a
-    /// config error.
+    /// Rebuild FTS shadow tables and `REINDEX` on the SQLite backend, or
+    /// recreate anything missing and `REINDEX` on PostgreSQL (issue #313).
+    /// Returns the tables rebuilt. OpenSearch returns a config error.
     pub fn rebuild_search_indexes(&self) -> IcmResult<Vec<String>> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.rebuild_search_indexes(),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.rebuild_search_indexes(),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "rebuild_search_indexes is only supported on the SQLite backend".into(),
+                "rebuild_search_indexes is only supported on the SQLite and PostgreSQL backends"
+                    .into(),
             )),
         }
     }

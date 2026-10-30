@@ -116,7 +116,7 @@ impl PostgresStore {
 /// Idempotent schema creation. Returns the embedding dimension the table
 /// is actually using (the stored value wins over `requested_dims` on an
 /// existing database).
-fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResult<usize> {
+pub(super) fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResult<usize> {
     if !(64..=4096).contains(&requested_dims) {
         return Err(IcmError::Config(format!(
             "embedding_dims must be between 64 and 4096, got {requested_dims}"
