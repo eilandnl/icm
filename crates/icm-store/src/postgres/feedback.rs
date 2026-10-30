@@ -7,6 +7,10 @@
 use super::*;
 
 pub(super) fn schema(dims: usize) -> String {
+    let fts_text = tokenizable(
+        "topic || ' ' || context || ' ' || predicted || ' ' || corrected \
+         || ' ' || coalesce(reason, '')",
+    );
     format!(
         "CREATE TABLE IF NOT EXISTS feedback (
             id TEXT PRIMARY KEY,
@@ -19,11 +23,7 @@ pub(super) fn schema(dims: usize) -> String {
             created_at TIMESTAMPTZ NOT NULL,
             applied_count INTEGER NOT NULL DEFAULT 0,
             embedding vector({dims}),
-            fts tsvector GENERATED ALWAYS AS (
-                to_tsvector('simple',
-                    topic || ' ' || context || ' ' || predicted || ' ' || corrected
-                    || ' ' || coalesce(reason, ''))
-            ) STORED
+            fts tsvector GENERATED ALWAYS AS (to_tsvector('simple', {fts_text})) STORED
         );
         CREATE INDEX IF NOT EXISTS idx_feedback_topic ON feedback(topic);
         CREATE INDEX IF NOT EXISTS idx_feedback_fts ON feedback USING GIN (fts);"
@@ -123,10 +123,12 @@ impl FeedbackStore for PostgresStore {
         let rows = c
             .query(
                 &format!(
-                    "SELECT {FEEDBACK_COLS}, ts_rank_cd(fts, q)::float8 \
-                     FROM feedback, websearch_to_tsquery('simple', $1) AS q \
-                     WHERE fts @@ q AND ($2::text IS NULL OR topic = $2) \
-                     ORDER BY ts_rank_cd(fts, q) DESC, id ASC LIMIT $3"
+                    "{with}SELECT {FEEDBACK_COLS}, {BM25_SCORE} AS bm25 \
+                     FROM feedback m {BM25_JOINS} \
+                     WHERE m.fts @@ bq.tsq AND ($2::text IS NULL OR m.topic = $2) \
+                     GROUP BY m.id, bs.n, bs.avgdl \
+                     ORDER BY bm25 DESC, m.id ASC LIMIT $3",
+                    with = bm25_with("feedback", "$1", "$1")
                 ),
                 &[&text, &topic, &pool],
             )

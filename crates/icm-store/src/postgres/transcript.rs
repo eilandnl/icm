@@ -7,7 +7,16 @@
 
 use super::*;
 
-pub(super) const SCHEMA: &str = "
+/// The tables and indexes, with the full-text vector of a message: its role,
+/// content and tool name, split into words on punctuation.
+pub(super) fn schema() -> String {
+    SCHEMA_TEMPLATE.replace(
+        "@FTS@",
+        &tokenizable("role || ' ' || content || ' ' || coalesce(tool_name, '')"),
+    )
+}
+
+const SCHEMA_TEMPLATE: &str = "
     CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         agent TEXT NOT NULL DEFAULT '',
@@ -28,10 +37,7 @@ pub(super) const SCHEMA: &str = "
         tokens BIGINT,
         ts TIMESTAMPTZ NOT NULL,
         metadata TEXT NOT NULL DEFAULT '{}',
-        fts tsvector GENERATED ALWAYS AS (
-            to_tsvector('simple',
-                role || ' ' || content || ' ' || coalesce(tool_name, ''))
-        ) STORED
+        fts tsvector GENERATED ALWAYS AS (to_tsvector('simple', @FTS@)) STORED
     );
     CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
@@ -259,21 +265,25 @@ impl TranscriptStore for PostgresStore {
         project: Option<&str>,
         limit: usize,
     ) -> IcmResult<Vec<TranscriptHit>> {
-        let query = query.replace('\0', "");
+        let query = tokenize_query(&query.replace('\0', ""));
+        let words = bm25_words(&query);
         let mut c = self.conn()?;
         let rows = c
             .query(
-                "SELECT m.id, m.session_id, m.role, m.content, m.tool_name, m.tokens, m.ts, \
-                        m.metadata, \
-                        s.id, s.agent, s.project, s.started_at, s.updated_at, s.metadata, \
-                        ts_rank_cd(m.fts, q)::float8 \
-                 FROM messages m JOIN sessions s ON s.id = m.session_id, \
-                      websearch_to_tsquery('simple', $1) AS q \
-                 WHERE m.fts @@ q \
-                   AND ($2::text IS NULL OR m.session_id = $2) \
-                   AND ($3::text IS NULL OR s.project = $3) \
-                 ORDER BY ts_rank_cd(m.fts, q) DESC, m.ts DESC, m.id ASC LIMIT $4",
-                &[&query, &session_id, &project, &sql_bound(limit)],
+                &format!(
+                    "{with}SELECT m.id, m.session_id, m.role, m.content, m.tool_name, m.tokens, \
+                            m.ts, m.metadata, \
+                            s.id, s.agent, s.project, s.started_at, s.updated_at, s.metadata, \
+                            {BM25_SCORE} AS score \
+                     FROM messages m JOIN sessions s ON s.id = m.session_id {BM25_JOINS} \
+                     WHERE m.fts @@ bq.tsq \
+                       AND ($3::text IS NULL OR m.session_id = $3) \
+                       AND ($4::text IS NULL OR s.project = $4) \
+                     GROUP BY m.id, s.id, bs.n, bs.avgdl \
+                     ORDER BY score DESC, m.ts DESC, m.id ASC LIMIT $5",
+                    with = bm25_with("messages", "$1", "$2")
+                ),
+                &[&words, &query, &session_id, &project, &sql_bound(limit)],
             )
             .map_err(pg_err)?;
         Ok(rows

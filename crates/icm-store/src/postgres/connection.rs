@@ -113,6 +113,17 @@ impl PostgresStore {
     pub fn ensure_vec_init() {}
 }
 
+/// The full-text vector of a memory: its topic, summary and keywords, split
+/// into words on punctuation (see [`tokenizable`]).
+fn memories_fts_expr() -> String {
+    format!(
+        "to_tsvector('simple', {})",
+        tokenizable(
+            "coalesce(topic, '') || ' ' || coalesce(summary, '') || ' ' || coalesce(keywords, '')"
+        )
+    )
+}
+
 /// [`init_schema`] with other processes kept out meanwhile. Several
 /// processes starting at once on an empty database (a rollout of replicas)
 /// otherwise race on `CREATE EXTENSION` and `CREATE TABLE`, and all but one
@@ -194,6 +205,32 @@ pub(super) fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResu
             .map_err(pg_err)?;
     }
 
+    // A `memories` table made before the indexed text was split on
+    // punctuation holds the old column. Rebuilding it rewrites the table once;
+    // its GIN index goes with the column and is created again below.
+    let current_fts: Option<String> = client
+        .query_opt(
+            "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d \
+             JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+             WHERE d.adrelid = to_regclass('memories') AND a.attname = 'fts'",
+            &[],
+        )
+        .map_err(pg_err)?
+        .map(|row| row.get(0));
+    if let Some(def) = current_fts
+        && !def.contains("translate(")
+    {
+        client
+            .batch_execute(&format!(
+                "ALTER TABLE memories DROP COLUMN fts; \
+                 ALTER TABLE memories ADD COLUMN fts tsvector \
+                     GENERATED ALWAYS AS ({}) STORED",
+                memories_fts_expr()
+            ))
+            .map_err(pg_err)?;
+    }
+
+    let fts_expr = memories_fts_expr();
     client
         .batch_execute(&format!(
             "CREATE TABLE IF NOT EXISTS memories (
@@ -213,12 +250,7 @@ pub(super) fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResu
                 related_ids TEXT,
                 summary_hash TEXT,
                 embedding vector({dims}),
-                fts tsvector GENERATED ALWAYS AS (
-                    to_tsvector('simple',
-                        coalesce(topic, '') || ' ' ||
-                        coalesce(summary, '') || ' ' ||
-                        coalesce(keywords, ''))
-                ) STORED
+                fts tsvector GENERATED ALWAYS AS ({fts_expr}) STORED
             );
 
             CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories(topic);
@@ -282,8 +314,10 @@ pub(super) fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResu
     client
         .batch_execute(&feedback::schema(dims))
         .map_err(pg_err)?;
-    client.batch_execute(transcript::SCHEMA).map_err(pg_err)?;
-    client.batch_execute(memoir::SCHEMA).map_err(pg_err)?;
+    client
+        .batch_execute(&transcript::schema())
+        .map_err(pg_err)?;
+    client.batch_execute(&memoir::schema()).map_err(pg_err)?;
 
     // A vector index needs a concrete dimension; create it after the
     // table exists. HNSW is available in pgvector >= 0.5 (the images we

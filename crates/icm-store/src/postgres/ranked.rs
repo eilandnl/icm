@@ -4,8 +4,12 @@
 //! Same contract as `SqliteStore::search_ranked`; see there for the full
 //! description. What differs on PostgreSQL:
 //!
-//! - the lexical arm orders by `ts_rank_cd` over the generated `tsvector`
-//!   column, not BM25, so `RawRelevance::bm25` is always `None` here;
+//! - the lexical arm computes BM25 (k1 1.2, b 0.75, as FTS5 does) over the
+//!   generated `tsvector` column: PostgreSQL has no ranking function that
+//!   weighs how rare a term is, and `ts_rank_cd` alone ranked the right
+//!   memory first far less often (see `ranked_fts_arm`). The IDF is the
+//!   Lucene form `ln(1 + (N - n + 0.5) / (n + 0.5))`, so scores are not
+//!   comparable with FTS5's, only their order is;
 //! - the vector arm is capped at [`VEC_MAX_DEPTH`]: an HNSW index scan
 //!   returns at most `hnsw.ef_search` rows, whose ceiling is 1000;
 //! - neither arm reads the embedding column. Final hits are hydrated in
@@ -31,12 +35,16 @@ const MAX_WIDENINGS: usize = 3;
 /// [`SELECT_COLS`] with the embedding replaced by NULL: at depth 1000+
 /// reading the vectors would only be to rank ids.
 const ARM_COLS: &str = "id, created_at, updated_at, last_accessed, access_count, weight, topic, summary, raw_excerpt, keywords, importance, source_type, source_data, related_ids, NULL::vector AS embedding";
+/// [`ARM_COLS`] qualified with the `m` alias of the BM25 query.
+const LEX_COLS: &str = "m.id, m.created_at, m.updated_at, m.last_accessed, m.access_count, m.weight, m.topic, m.summary, m.raw_excerpt, m.keywords, m.importance, m.source_type, m.source_data, m.related_ids, NULL::vector AS embedding";
 
 /// One arm's candidates that passed the caller's filter, best first.
 struct Arm {
     kept: Vec<Memory>,
     /// Cosine similarity per kept id (vector arm only).
     similarity: HashMap<String, f32>,
+    /// BM25 per kept id (lexical arm only).
+    bm25: HashMap<String, f32>,
     /// The arm returned as many rows as it was asked for: more may exist
     /// beyond `depth`.
     saturated: bool,
@@ -47,6 +55,7 @@ impl Arm {
         Self {
             kept: Vec::new(),
             similarity: HashMap::new(),
+            bm25: HashMap::new(),
             saturated: false,
         }
     }
@@ -58,16 +67,7 @@ impl Arm {
 fn lexical_query(text: &str) -> String {
     let cleaned: String = text
         .chars()
-        .map(|c| {
-            if matches!(
-                c,
-                '-' | '*' | '"' | '(' | ')' | '{' | '}' | ':' | '^' | '+' | '~' | '\\'
-            ) {
-                ' '
-            } else {
-                c
-            }
-        })
+        .map(|c| if c.is_ascii_punctuation() { ' ' } else { c })
         .collect();
     cleaned
         .split_whitespace()
@@ -186,7 +186,7 @@ impl PostgresStore {
             let rank = |arm: usize| hit.ranks.get(arm).copied().flatten();
             if let Some(memory) = by_id.remove(&hit.id) {
                 let raw = RawRelevance {
-                    bm25: None,
+                    bm25: fts.bm25.get(&hit.id).copied(),
                     similarity: vec.similarity.get(&hit.id).copied(),
                 };
                 hits.push(RankedHit {
@@ -204,8 +204,8 @@ impl PostgresStore {
         Ok(hits)
     }
 
-    /// Lexical arm: `ts_rank_cd` order, at most `depth` rows, filtered by
-    /// `keep`.
+    /// Lexical arm: BM25 order (see [`bm25_with`]), at most `depth` rows,
+    /// filtered by `keep`.
     fn ranked_fts_arm(
         &self,
         match_expr: &str,
@@ -215,21 +215,30 @@ impl PostgresStore {
         if match_expr.is_empty() {
             return Ok(Arm::empty());
         }
+        // The same words without the `or` between them, to look up their
+        // statistics. Words never contain a space, so this is exact.
+        let words = match_expr.replace(" or ", " ");
 
         let mut c = self.conn()?;
         let rows = c
             .query(
                 &format!(
-                    "SELECT {ARM_COLS} \
-                     FROM memories, websearch_to_tsquery('simple', $1) AS q \
-                     WHERE fts @@ q \
-                     ORDER BY ts_rank_cd(fts, q) DESC, id ASC \
-                     LIMIT $2"
+                    "{with}SELECT {LEX_COLS}, {BM25_SCORE} AS bm25 \
+                     FROM memories m {BM25_JOINS} \
+                     WHERE m.fts @@ bq.tsq \
+                     GROUP BY m.id, bs.n, bs.avgdl \
+                     ORDER BY bm25 DESC, m.id ASC \
+                     LIMIT $3",
+                    with = bm25_with("memories", "$1", "$2")
                 ),
-                &[&match_expr, &(depth as i64)],
+                &[&words, &match_expr, &sql_bound(depth)],
             )
             .map_err(pg_err)?;
         let saturated = rows.len() >= depth;
+        let bm25 = rows
+            .iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, f64>(15) as f32))
+            .collect();
         Ok(Arm {
             kept: rows
                 .iter()
@@ -237,6 +246,7 @@ impl PostgresStore {
                 .filter(|memory| keep(memory))
                 .collect(),
             similarity: HashMap::new(),
+            bm25,
             saturated,
         })
     }
@@ -309,6 +319,7 @@ impl PostgresStore {
                 .filter(|memory| keep(memory))
                 .collect(),
             similarity,
+            bm25: HashMap::new(),
             saturated,
         })
     }
@@ -384,6 +395,11 @@ mod tests {
         );
         assert_eq!(lexical_query("  -- ** "), "");
         assert_eq!(lexical_query(""), "");
+        // Split like the indexed text: a path or a filename is its words.
+        assert_eq!(
+            lexical_query("src/lib.rs file_name.py"),
+            "src or lib or rs or file or name or py"
+        );
     }
 
     fn store(name: &str) -> Option<PostgresStore> {
@@ -611,8 +627,10 @@ mod tests {
         for (pos, h) in hits.iter().enumerate() {
             assert_eq!(h.fts_rank, Some(pos as u32 + 1));
             assert_eq!(h.vec_rank, None);
-            assert_eq!(h.raw.bm25, None);
+            assert!(h.raw.bm25.is_some_and(|bm25| bm25 > 0.0));
         }
+        // Higher reads better, and falls with the rank.
+        assert!(hits.windows(2).all(|w| w[0].raw.bm25 > w[1].raw.bm25));
 
         // An empty slice is "no embedding".
         let empty: [f32; 0] = [];
@@ -620,6 +638,50 @@ mod tests {
             .search_ranked(&query("rust", Some(&empty), 10, 50), &all)
             .unwrap();
         assert_eq!(ids(&same), ids(&hits));
+    }
+
+    /// A word found in few memories must count for more than one found in
+    /// most of them. `ts_rank_cd` ranks the two memories below the same,
+    /// which is the defect BM25 fixes.
+    #[test]
+    fn a_rare_query_word_outweighs_a_common_one() {
+        let Some(store) = store("rarity") else {
+            return;
+        };
+        // "common" is in every memory; "zephyr" is in one.
+        put(
+            &store,
+            "a-common",
+            "notes",
+            "common common common common",
+            None,
+        );
+        put(
+            &store,
+            "z-rare",
+            "notes",
+            "zephyr and one common word",
+            None,
+        );
+        for i in 0..30 {
+            put(
+                &store,
+                &format!("n-{i:02}"),
+                "notes",
+                &format!("common filler {i}"),
+                None,
+            );
+        }
+
+        let hits = store
+            .search_ranked(&query("common zephyr", None, 5, 50), &all)
+            .unwrap();
+        assert_eq!(hits[0].memory.id, "z-rare");
+    }
+
+    #[test]
+    fn arm_columns_agree_with_the_plain_column_list() {
+        assert_eq!(LEX_COLS.replace("m.", ""), ARM_COLS);
     }
 
     #[test]

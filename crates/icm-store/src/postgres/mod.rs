@@ -17,9 +17,11 @@
 //!   operator. Similarity is reported as `1 - distance` to match the
 //!   SQLite backend.
 //! - **PostgreSQL full-text search** replaces SQLite FTS5: a generated
-//!   `tsvector` column (config `simple`, no stemming, to mirror FTS5's
-//!   unicode61 tokenizer) with a GIN index, queried via
-//!   `websearch_to_tsquery` so arbitrary user input is operator-safe.
+//!   `tsvector` column (config `simple`, no stemming, ASCII punctuation
+//!   turned into spaces first, to mirror FTS5's unicode61 tokenizer) with a
+//!   GIN index, queried via `websearch_to_tsquery` so arbitrary user input is
+//!   operator-safe. Results are ranked by BM25 computed from the table's own
+//!   statistics, since `ts_rank_cd` does not weigh how rare a term is.
 //! - **Connection string** comes from `ICM_POSTGRES_URL` (or
 //!   `DATABASE_URL` as a fallback). The `&Path` arguments that the CLI
 //!   passes for the SQLite file are ignored.

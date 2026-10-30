@@ -302,3 +302,184 @@ fn many_first_starts_at_once_all_succeed() {
         handle.join().unwrap().unwrap();
     }
 }
+
+#[test]
+fn punctuation_list_has_one_blank_per_character() {
+    assert_eq!(PUNCTUATION.replace("''", "'").chars().count(), 32);
+    assert_eq!(
+        PUNCTUATION.replace("''", "'"),
+        (0u8..128)
+            .map(char::from)
+            .filter(char::is_ascii_punctuation)
+            .collect::<String>()
+    );
+}
+
+#[test]
+fn queries_are_split_like_the_indexed_text_but_keep_their_syntax() {
+    assert_eq!(tokenize_query("src/lib.rs"), "src lib rs");
+    assert_eq!(tokenize_query("state-of-the-art"), "state of the art");
+    assert_eq!(tokenize_query("(hello"), " hello");
+    assert_eq!(tokenize_query("notes: ^vec*"), "notes   vec ");
+    // What websearch_to_tsquery reads as syntax stays.
+    assert_eq!(tokenize_query("\"BRIN indexes\""), "\"BRIN indexes\"");
+    assert_eq!(tokenize_query("postgres -jsonb"), "postgres -jsonb");
+    assert_eq!(tokenize_query("a - b"), "a   b");
+    assert_eq!(tokenize_query("postgres or mysql"), "postgres or mysql");
+}
+
+/// Words inside paths, filenames and hyphenated terms must be found, as they
+/// are on SQLite. PostgreSQL's parser keeps each of those as one token.
+#[test]
+fn words_inside_paths_and_hyphenated_terms_are_found_everywhere() {
+    use icm_core::fusion::RankedQuery;
+    let Some(store) = live_store("tokens", 64) else {
+        return;
+    };
+    let mut m = Memory::new(
+        "notes".into(),
+        "Edit src/lib.rs and file_name.py, follow state-of-the-art rules".into(),
+        Importance::Medium,
+    );
+    m.keywords = vec!["my-tool".into()];
+    let id = store.store(m).unwrap();
+    store
+        .store(Memory::new(
+            "notes".into(),
+            "unrelated filler".into(),
+            Importance::Medium,
+        ))
+        .unwrap();
+
+    let ranked = |text: &str| -> Vec<String> {
+        let q = RankedQuery {
+            text,
+            embedding: None,
+            limit: 5,
+            depth: 50,
+            window: None,
+        };
+        store
+            .search_ranked(&q, &|_| true)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.memory.id)
+            .collect()
+    };
+    for word in [
+        "lib",
+        "rs",
+        "name",
+        "py",
+        "art",
+        "state",
+        "tool",
+        "src/lib.rs",
+        "file_name.py",
+    ] {
+        assert_eq!(ranked(word), vec![id.clone()], "ranked search for {word:?}");
+    }
+    for word in ["lib", "name", "art"] {
+        let hits = store.search_fts(word, 5).unwrap();
+        assert_eq!(hits.len(), 1, "search_fts for {word:?}");
+    }
+
+    let sid = store.create_session("cli", None, None).unwrap();
+    store
+        .record_message(
+            &sid,
+            Role::User,
+            "see src/lib.rs and file_name.py",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    for word in ["lib", "name", "src/lib.rs"] {
+        assert_eq!(
+            store.search_transcripts(word, None, None, 5).unwrap().len(),
+            1,
+            "transcript search for {word:?}"
+        );
+    }
+
+    store
+        .store_feedback(Feedback::new(
+            "t".into(),
+            "edited src/lib.rs".into(),
+            "p".into(),
+            "use file_name.py".into(),
+            None,
+            "s".into(),
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .search_feedback("lib name", None, None, 5)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let memoir = store
+        .create_memoir(Memoir::new("m".into(), String::new()))
+        .unwrap();
+    store
+        .add_concept(Concept::new(
+            memoir.clone(),
+            "my-tool".into(),
+            "wraps src/lib.rs".into(),
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .search_concepts_fts(&memoir, "tool lib", 5)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A `memories` table made with the old column definition is rebuilt on the
+/// next start, and its memories become searchable by their words.
+#[test]
+fn an_old_full_text_column_is_rebuilt_on_the_next_start() {
+    let Some(url) = live_database("fts_migration") else {
+        return;
+    };
+    let store = PostgresStore::connect_url(&url, 64, false).unwrap();
+    store
+        .store(Memory::new(
+            "notes".into(),
+            "Edit src/lib.rs today".into(),
+            Importance::Medium,
+        ))
+        .unwrap();
+    // The column as it was before words were split on punctuation.
+    store
+        .conn()
+        .unwrap()
+        .batch_execute(
+            "ALTER TABLE memories DROP COLUMN fts; \
+             ALTER TABLE memories ADD COLUMN fts tsvector GENERATED ALWAYS AS ( \
+                 to_tsvector('simple', coalesce(topic, '') || ' ' || coalesce(summary, '') \
+                     || ' ' || coalesce(keywords, ''))) STORED; \
+             CREATE INDEX idx_memories_fts ON memories USING GIN (fts)",
+        )
+        .unwrap();
+    assert!(store.search_fts("lib", 5).unwrap().is_empty());
+
+    let restarted = PostgresStore::connect_url(&url, 64, false).unwrap();
+    assert_eq!(restarted.search_fts("lib", 5).unwrap().len(), 1);
+    assert_eq!(restarted.count().unwrap(), 1, "no memory was lost");
+    let index_valid: bool = restarted
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_memories_fts'::regclass",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(index_valid);
+}

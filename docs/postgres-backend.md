@@ -25,9 +25,19 @@ that benefits from being shared:
   vector)
 - ranked recall (`search_ranked`): a lexical and a vector arm fetched deep,
   filtered, fused by Reciprocal Rank Fusion, with the optional time
-  window. The lexical arm ranks by `ts_rank_cd`, not BM25, so the raw BM25
-  score is not reported; the vector arm reaches at most 1000 candidates
-  (pgvector's `hnsw.ef_search` ceiling), and an HNSW scan is approximate
+  window. The lexical arm ranks by BM25 computed in SQL (k1 1.2, b 0.75,
+  as FTS5 does), because PostgreSQL's `ts_rank_cd` does not weigh how rare
+  a term is; the scores follow the same order as SQLite's but are not the
+  same numbers. The vector arm reaches at most 1000 candidates (pgvector's
+  `hnsw.ef_search` ceiling), and an HNSW scan is approximate
+- full-text indexing splits words on punctuation, as SQLite's does:
+  PostgreSQL's parser keeps `src/lib.rs`, `file_name.py` and
+  `state-of-the-art` as one token each, which left about one memory in six
+  unfindable by two of its own words. The `memories` column is rebuilt once
+  on the first start after upgrading (4 s for 8,000 memories); other
+  tables are created with it. The statistics BM25 needs are computed per
+  query, which scans the table for its average length: about 5 ms per 10,000
+  rows
 - `list`, `topics`, `stats`, `health`
 - temporal `decay` (access-aware) and `prune`
 - auto-consolidation (`[memory] auto_consolidate_enabled`): the same
@@ -49,7 +59,7 @@ that benefits from being shared:
   as `word word` (all must match), `word or word`, `"exact phrase"` and
   `-word`; it is not FTS5 syntax, so `AND`, `NOT`, `NEAR`, `prefix*` and
   parentheses are not understood, and a malformed query matches loosely
-  instead of returning nothing. Results rank by `ts_rank_cd`, not BM25
+  instead of returning nothing. Results rank by BM25, as above
 
 - memoirs (`icm memoir …`): named memoirs of concepts with typed links that
   must stay acyclic, concept refinement, and search by words or by label.

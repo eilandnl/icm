@@ -8,6 +8,91 @@ pub(crate) fn pg_err(e: postgres::Error) -> IcmError {
     IcmError::Database(e.to_string())
 }
 
+/// The 32 ASCII punctuation characters, as the text of a SQL string literal
+/// (so the quote is doubled).
+pub(crate) const PUNCTUATION: &str = r##"!"#$%&''()*+,-./:;<=>?@[\]^_`{|}~"##;
+
+/// SQL that turns every ASCII punctuation character of `expr` into a space,
+/// for `to_tsvector`. PostgreSQL's parser keeps `file_name.py`, `src/lib.rs`
+/// and `state-of-the-art` as one token each, so a search for `lib` or `art`
+/// found nothing: about one memory in six could not be found by two of its
+/// own words. SQLite's FTS5 splits on everything that is not a letter or a
+/// digit, and so does this.
+pub(crate) fn tokenizable(expr: &str) -> String {
+    format!(
+        "translate({expr}, '{PUNCTUATION}', '{}')",
+        " ".repeat(PUNCTUATION.replace("''", "'").chars().count())
+    )
+}
+
+/// Query text the way the indexed text is tokenized: ASCII punctuation
+/// separates words, except what `websearch_to_tsquery` reads as syntax, a `"`
+/// and a `-` that starts a word.
+pub(crate) fn tokenize_query(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut previous: Option<char> = None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let starts_word = previous.is_none_or(|p| p.is_whitespace() || p == '"');
+        let syntax = c == '"'
+            || (c == '-' && starts_word && chars.peek().is_some_and(|next| !next.is_whitespace()));
+        out.push(if c.is_ascii_punctuation() && !syntax {
+            ' '
+        } else {
+            c
+        });
+        previous = Some(c);
+    }
+    out
+}
+
+/// The `WITH` clauses of a BM25 query over the `fts` column of `table`, which
+/// the query must alias `m`. `words` and `query` are the placeholders of the
+/// words to weigh (plain text, no operators) and of the text for
+/// `websearch_to_tsquery` that selects the rows. PostgreSQL has no ranking
+/// function that weighs how rare a term is, and `ts_rank_cd` alone put the
+/// right memory first in 60% of queries on a real corpus, against 92% for this
+/// and 96% for SQLite's FTS5. The statistics come from the table itself: its
+/// size and average length (a scan, about 5 ms per 10k rows) and one document
+/// count per term from the GIN index.
+pub(crate) fn bm25_with(table: &str, words: &str, query: &str) -> String {
+    format!(
+        "WITH terms AS MATERIALIZED ( \
+             SELECT DISTINCT lexeme FROM unnest(to_tsvector('simple', {words}))), \
+         dfs AS MATERIALIZED ( \
+             SELECT t.lexeme, (SELECT count(*) FROM {table} \
+                  WHERE fts @@ plainto_tsquery('simple', t.lexeme))::float8 AS df \
+             FROM terms t), \
+         bs AS MATERIALIZED ( \
+             SELECT count(*)::float8 AS n, avg(length(fts))::float8 AS avgdl FROM {table}), \
+         bq AS MATERIALIZED (SELECT websearch_to_tsquery('simple', {query}) AS tsq) "
+    )
+}
+
+/// The joins that go with [`bm25_with`], after `FROM <table> m`: they bring
+/// in the statistics, the query (`bq.tsq`, for the `WHERE`) and each matching
+/// row's term frequencies. The caller groups by the primary key of `m`.
+pub(crate) const BM25_JOINS: &str = "CROSS JOIN bs CROSS JOIN bq \
+     CROSS JOIN LATERAL ( \
+         SELECT d.df, array_length(u.positions, 1)::float8 AS tf \
+         FROM unnest(m.fts) u JOIN dfs d ON d.lexeme = u.lexeme) bx";
+
+/// BM25 of a row (k1 1.2, b 0.75, as FTS5 does), summed over the query
+/// terms. The IDF is the Lucene form `ln(1 + (N - n + 0.5) / (n + 0.5))`, so
+/// scores are not comparable with FTS5's, only their order is.
+pub(crate) const BM25_SCORE: &str = "SUM(ln(1 + (bs.n - bx.df + 0.5) / (bx.df + 0.5)) \
+     * (bx.tf * 2.2) / (bx.tf + 1.2 * (0.25 + 0.75 * length(m.fts) / bs.avgdl)))::float8";
+
+/// The words of `text` to weigh in a BM25 query: letters and digits, the
+/// `or` between them dropped.
+pub(crate) fn bm25_words(text: &str) -> String {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !w.eq_ignore_ascii_case("or"))
+        .take(100)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// A `usize` as a SQL `LIMIT`/`OFFSET` bound. Callers pass `usize::MAX` for
 /// "no limit", and `as i64` wraps that to -1, which SQLite reads as no limit
 /// but PostgreSQL rejects as negative.

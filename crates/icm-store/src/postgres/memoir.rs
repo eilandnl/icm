@@ -7,7 +7,16 @@
 
 use super::*;
 
-pub(super) const SCHEMA: &str = "
+/// The tables and indexes, with the full-text vector of a concept: its name,
+/// definition and labels, split into words on punctuation.
+pub(super) fn schema() -> String {
+    SCHEMA_TEMPLATE.replace(
+        "@FTS@",
+        &tokenizable("name || ' ' || definition || ' ' || labels"),
+    )
+}
+
+const SCHEMA_TEMPLATE: &str = "
     CREATE TABLE IF NOT EXISTS memoirs (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -28,9 +37,7 @@ pub(super) const SCHEMA: &str = "
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL,
         source_memory_ids TEXT NOT NULL DEFAULT '[]',
-        fts tsvector GENERATED ALWAYS AS (
-            to_tsvector('simple', name || ' ' || definition || ' ' || labels)
-        ) STORED,
+        fts tsvector GENERATED ALWAYS AS (to_tsvector('simple', @FTS@)) STORED,
         UNIQUE (memoir_id, name)
     );
     CREATE INDEX IF NOT EXISTS idx_concepts_memoir ON concepts(memoir_id);
