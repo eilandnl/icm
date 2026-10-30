@@ -258,6 +258,7 @@ fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResult<usize> {
     client
         .batch_execute(&feedback::schema(dims))
         .map_err(pg_err)?;
+    client.batch_execute(transcript::SCHEMA).map_err(pg_err)?;
 
     // A vector index needs a concrete dimension; create it after the
     // table exists. HNSW is available in pgvector >= 0.5 (the images we

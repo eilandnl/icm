@@ -44,8 +44,14 @@ that benefits from being shared:
   a 30% full-text / 70% semantic blend. The semantic part is an exact
   scan with no vector index, as feedback is low-cardinality
 
-The remaining subsystems — memoir graph, verbatim transcripts, and
-pattern mining — return a clear
+- verbatim transcripts (`icm transcript …`): sessions and messages, with
+  the same size caps as SQLite. Search is PostgreSQL full-text search read
+  as `word word` (all must match), `word or word`, `"exact phrase"` and
+  `-word`; it is not FTS5 syntax, so `AND`, `NOT`, `NEAR`, `prefix*` and
+  parentheses are not understood, and a malformed query matches loosely
+  instead of returning nothing. Results rank by `ts_rank_cd`, not BM25
+
+The remaining subsystems — memoir graph and pattern mining — return a clear
 `operation not supported on this storage backend` error on PostgreSQL for
 now. They remain fully available on the default SQLite backend.
 
