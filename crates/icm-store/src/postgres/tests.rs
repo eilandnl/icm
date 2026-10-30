@@ -483,3 +483,21 @@ fn an_old_full_text_column_is_rebuilt_on_the_next_start() {
         .get(0);
     assert!(index_valid);
 }
+
+/// `postgres::Error` prints only "db error" for what the server refused. A
+/// failed command must say why.
+#[test]
+fn a_refused_statement_shows_the_servers_message() {
+    let Some(store) = live_store("error_text", 64) else {
+        return;
+    };
+    store
+        .create_memoir(Memoir::new("same".into(), String::new()))
+        .unwrap();
+    let err = store
+        .create_memoir(Memoir::new("same".into(), String::new()))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("duplicate key value"), "{err}");
+    assert!(err.contains("SQLSTATE 23505"), "{err}");
+}

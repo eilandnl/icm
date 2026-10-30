@@ -5,7 +5,20 @@
 use super::*;
 
 pub(crate) fn pg_err(e: postgres::Error) -> IcmError {
-    IcmError::Database(e.to_string())
+    IcmError::Database(describe(&e))
+}
+
+/// `e` with the server's own message and its SQLSTATE. `postgres::Error`
+/// prints only "db error" for anything the server refused, which left a
+/// failed `icm export` or a rejected connection undiagnosable.
+pub(crate) fn describe(e: &postgres::Error) -> String {
+    match e.as_db_error() {
+        Some(db) => format!("{} (SQLSTATE {})", db.message(), db.code().code()),
+        None => match std::error::Error::source(e) {
+            Some(cause) => format!("{e}: {cause}"),
+            None => e.to_string(),
+        },
+    }
 }
 
 /// The 32 ASCII punctuation characters, as the text of a SQL string literal
