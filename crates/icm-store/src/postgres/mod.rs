@@ -28,9 +28,9 @@
 //! shared-memory use case behind #301) plus the ancillary tables used by
 //! the normal store/recall/hook path (hook telemetry, the extraction
 //! queue, code areas, the key/value metadata), structured facts, feedback,
-//! transcripts and the memoir graph. Pattern mining returns
-//! [`IcmError::Unsupported`] on this backend for now; it remains fully
-//! available on the default SQLite backend.
+//! transcripts, the memoir graph and pattern mining. What stays
+//! SQLite-only are the operations on the SQLite file itself (integrity
+//! check, search-index rebuild, file backup, vector-index reset).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

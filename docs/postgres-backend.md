@@ -58,9 +58,19 @@ that benefits from being shared:
   a cycle, and a label search matches one whole label, so `domain` of one
   label and `rust` of another never combine as they can on SQLite
 
-The remaining subsystem — pattern mining — returns a clear
-`operation not supported on this storage backend` error on PostgreSQL for
-now. They remain fully available on the default SQLite backend.
+- pattern mining (`icm patterns …`): clusters of memories with overlapping
+  keywords, and extracting a cluster as a concept
+- the key/value metadata (`icm_metadata`), which the hooks use to remember
+  how far into a conversation they have already read
+
+## What stays SQLite-only
+
+These act on the SQLite file itself, and PostgreSQL has its own tools for
+each: the integrity check (`PRAGMA integrity_check`), rebuilding the search
+indexes (`REINDEX`), the file backup and its rotation (`pg_dump`), and
+resetting the vector index for a new embedding model (the `vector(N)`
+column is sized when the database is created). They return an error on
+PostgreSQL.
 
 ## Requirements
 

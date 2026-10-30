@@ -297,27 +297,31 @@ impl Store {
     }
 
     /// Read a string value from `icm_metadata`. Returns `Ok(None)` when
-    /// absent. Only supported on the SQLite backend.
+    /// absent. Supported on the SQLite and PostgreSQL backends.
     pub fn get_metadata_str(&self, key: &str) -> IcmResult<Option<String>> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.get_metadata_str(key),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.get_metadata_str(key),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "get_metadata_str is only supported on the SQLite backend".into(),
+                "get_metadata_str is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
 
-    /// Upsert a string value into `icm_metadata`. Only supported on the
-    /// SQLite backend.
+    /// Upsert a string value into `icm_metadata`. Supported on the SQLite
+    /// and PostgreSQL backends.
     pub fn set_metadata_str(&self, key: &str, value: &str) -> IcmResult<()> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.set_metadata_str(key, value),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.set_metadata_str(key, value),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "set_metadata_str is only supported on the SQLite backend".into(),
+                "set_metadata_str is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
