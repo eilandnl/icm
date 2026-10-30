@@ -150,6 +150,7 @@ impl MemoryStore for PostgresStore {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
+        let query = tokenize_query(query);
         let mut c = self.conn()?;
         let rows = c
             .query(
@@ -201,6 +202,7 @@ impl MemoryStore for PostgresStore {
     ) -> IcmResult<Vec<(Memory, f32)>> {
         let limit = limit.min(1000);
         let pool_size = limit * 4;
+        let query = tokenize_query(query);
 
         // 1. FTS candidates (id + rank). Lock released at scope end.
         let fts_pairs: Vec<(String, f64)> = if query.trim().is_empty() {
@@ -611,9 +613,3 @@ impl MemoryStore for PostgresStore {
         })
     }
 }
-
-// Unsupported subsystems on this backend (first cut, issue #301).
-//
-// These return `IcmError::Unsupported` so the binary keeps working for the
-// core shared-memory use case while the heavier subsystems remain on the
-// default SQLite backend. A follow-up can port them.

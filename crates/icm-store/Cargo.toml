@@ -22,7 +22,7 @@ backend-sqlite = ["dep:rusqlite", "dep:sqlite-vec", "dep:zerocopy"]
 # node-local SQLite file cannot do. Mutually exclusive with
 # `backend-sqlite` (see the `compile_error!` guard in `lib.rs`); build
 # with `--no-default-features --features postgres`.
-postgres = ["dep:postgres", "dep:pgvector"]
+postgres = ["dep:postgres", "dep:pgvector", "dep:tokio-postgres-rustls", "dep:rustls", "dep:rustls-native-certs"]
 
 # Opt-in network-accessible OpenSearch backend (issue #301). A
 # search-native shared store: BM25 full-text + `knn_vector` HNSW vector
@@ -54,6 +54,9 @@ zerocopy = { workspace = true, optional = true }
 # type binding used for embedding KNN search.
 postgres = { version = "0.19", features = ["with-chrono-0_4"], optional = true }
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
+tokio-postgres-rustls = { version = "0.14", features = ["ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 
 # OpenSearch backend (opt-in). Blocking HTTP client + JSON bodies hit the
 # OpenSearch REST API directly — no async runtime, matching the store's

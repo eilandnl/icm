@@ -17,9 +17,11 @@
 //!   operator. Similarity is reported as `1 - distance` to match the
 //!   SQLite backend.
 //! - **PostgreSQL full-text search** replaces SQLite FTS5: a generated
-//!   `tsvector` column (config `simple`, no stemming, to mirror FTS5's
-//!   unicode61 tokenizer) with a GIN index, queried via
-//!   `websearch_to_tsquery` so arbitrary user input is operator-safe.
+//!   `tsvector` column (config `simple`, no stemming, ASCII punctuation
+//!   turned into spaces first, to mirror FTS5's unicode61 tokenizer) with a
+//!   GIN index, queried via `websearch_to_tsquery` so arbitrary user input is
+//!   operator-safe. Results are ranked by BM25 computed from the table's own
+//!   statistics, since `ts_rank_cd` does not weigh how rare a term is.
 //! - **Connection string** comes from `ICM_POSTGRES_URL` (or
 //!   `DATABASE_URL` as a fallback). The `&Path` arguments that the CLI
 //!   passes for the SQLite file are ignored.
@@ -27,18 +29,19 @@
 //! Scope of this first cut: the full [`MemoryStore`] surface (the core
 //! shared-memory use case behind #301) plus the ancillary tables used by
 //! the normal store/recall/hook path (hook telemetry, the extraction
-//! queue, code areas, the key/value metadata). The heavier subsystems
-//! (memoir graph, transcripts, structured facts, feedback, pattern
-//! mining) return [`IcmError::Unsupported`] on this backend for now;
-//! they remain fully available on the default SQLite backend.
+//! queue, code areas, the key/value metadata), structured facts, feedback,
+//! transcripts, the memoir graph and pattern mining. What stays
+//! SQLite-only are the operations on the SQLite file itself (integrity
+//! check, search-index rebuild, file backup, vector-index reset).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use postgres::types::ToSql;
-use postgres::{Client, GenericClient, NoTls};
+use postgres::{Client, GenericClient};
 
 use icm_core::{
     Concept, ConceptLink, Embedder, Fact, FactsStats, FactsStore, Feedback, FeedbackStats,
@@ -60,39 +63,26 @@ pub use crate::common::{
 /// PostgreSQL-backed store. See the module docs.
 pub struct PostgresStore {
     client: Mutex<Client>,
-    embedding_dims: usize,
+    /// Dimension of the `vector(N)` columns. Changes when the vector index
+    /// is reset for another embedding model.
+    embedding_dims: AtomicUsize,
     readonly: bool,
-}
-
-/// One-shot warning that auto-consolidation silently does nothing on this
-/// backend (see [`PostgresStore::auto_consolidate`]).
-fn warn_auto_consolidate_unsupported() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "auto-consolidation is not implemented on the PostgreSQL backend; \
-             topics will keep growing (auto_consolidate_enabled has no effect here)"
-        );
-    });
-}
-
-fn unsupported<T>(op: &str) -> IcmResult<T> {
-    Err(IcmError::Unsupported(format!(
-        "{op} (use the default SQLite backend)"
-    )))
 }
 
 mod connection;
 mod facts;
 mod feedback;
 mod hooks;
+mod integrity;
 mod maintenance;
 mod memoir;
 mod memory;
 mod patterns;
+mod ranked;
 mod rows;
 #[cfg(test)]
 mod tests;
+mod tls;
 mod transcript;
 
 pub(crate) use rows::*;

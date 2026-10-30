@@ -185,9 +185,9 @@ impl Store {
         }
     }
 
-    /// Open the local SQLite database for maintenance — integrity check and
-    /// repair (issue #313). Only the SQLite backend has an on-disk file to
-    /// inspect; Postgres / OpenSearch have their own durability and return a
+    /// Open the database for maintenance — integrity check and repair
+    /// (issue #313). SQLite inspects its file; PostgreSQL its schema, without
+    /// migrating it first. OpenSearch has nothing to check and returns a
     /// config error.
     pub fn open_maintenance(path: &Path) -> IcmResult<Self> {
         match BackendKind::from_env()? {
@@ -202,26 +202,41 @@ impl Store {
                     Err(not_compiled("sqlite"))
                 }
             }
-            other => {
+            BackendKind::Postgres => {
+                #[cfg(feature = "postgres")]
+                {
+                    Ok(Store::Postgres(PostgresStore::open_maintenance(path)?))
+                }
+                #[cfg(not(feature = "postgres"))]
+                {
+                    let _ = path;
+                    Err(not_compiled("postgres"))
+                }
+            }
+            BackendKind::OpenSearch => {
                 let _ = path;
-                Err(IcmError::Config(format!(
-                    "`icm repair` / integrity check only applies to the SQLite \
-                     backend, but ICM_DB_BACKEND selects {other:?}"
-                )))
+                Err(IcmError::Config(
+                    "`icm repair` / integrity check applies to the SQLite and PostgreSQL \
+                     backends, but ICM_DB_BACKEND selects OpenSearch"
+                        .into(),
+                ))
             }
         }
     }
 
-    /// Run `PRAGMA integrity_check` on the SQLite backend (issue #313).
-    /// A healthy DB returns `["ok"]`. Only meaningful on a store opened via
-    /// [`Self::open_maintenance`]; other backends return a config error.
+    /// Run `PRAGMA integrity_check` on the SQLite backend, or the schema
+    /// check on PostgreSQL (issue #313). A healthy DB returns `["ok"]`. Only
+    /// meaningful on a store opened via [`Self::open_maintenance`]; OpenSearch
+    /// returns a config error.
     pub fn integrity_check(&self) -> IcmResult<Vec<String>> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.integrity_check(),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.integrity_check(),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "integrity_check is only supported on the SQLite backend".into(),
+                "integrity_check is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
@@ -232,23 +247,28 @@ impl Store {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.integrity_check_structural(),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.integrity_check_structural(),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "integrity_check is only supported on the SQLite backend".into(),
+                "integrity_check is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
 
-    /// Rebuild FTS shadow tables and `REINDEX` on the SQLite backend
-    /// (issue #313). Returns the FTS tables rebuilt. Other backends return a
-    /// config error.
+    /// Rebuild FTS shadow tables and `REINDEX` on the SQLite backend, or
+    /// recreate anything missing and `REINDEX` on PostgreSQL (issue #313).
+    /// Returns the tables rebuilt. OpenSearch returns a config error.
     pub fn rebuild_search_indexes(&self) -> IcmResult<Vec<String>> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.rebuild_search_indexes(),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.rebuild_search_indexes(),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "rebuild_search_indexes is only supported on the SQLite backend".into(),
+                "rebuild_search_indexes is only supported on the SQLite and PostgreSQL backends"
+                    .into(),
             )),
         }
     }
@@ -282,40 +302,46 @@ impl Store {
     }
 
     /// List every active fact across all entities (for `icm export`).
-    /// Only supported on the SQLite backend.
+    /// Supported on the SQLite and PostgreSQL backends.
     pub fn list_all_facts(&self) -> IcmResult<Vec<Fact>> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.list_all_facts(),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.list_all_facts(),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "list_all_facts is only supported on the SQLite backend".into(),
+                "list_all_facts is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
 
     /// Read a string value from `icm_metadata`. Returns `Ok(None)` when
-    /// absent. Only supported on the SQLite backend.
+    /// absent. Supported on the SQLite and PostgreSQL backends.
     pub fn get_metadata_str(&self, key: &str) -> IcmResult<Option<String>> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.get_metadata_str(key),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.get_metadata_str(key),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "get_metadata_str is only supported on the SQLite backend".into(),
+                "get_metadata_str is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
 
-    /// Upsert a string value into `icm_metadata`. Only supported on the
-    /// SQLite backend.
+    /// Upsert a string value into `icm_metadata`. Supported on the SQLite
+    /// and PostgreSQL backends.
     pub fn set_metadata_str(&self, key: &str, value: &str) -> IcmResult<()> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.set_metadata_str(key, value),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.set_metadata_str(key, value),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "set_metadata_str is only supported on the SQLite backend".into(),
+                "set_metadata_str is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }
@@ -458,17 +484,14 @@ impl Store {
 
     /// Drop every stored vector and recreate the vector index at `new_dims`
     /// (the explicit `icm embed --migrate` path). Returns the number of
-    /// memories whose embedding was cleared. SQLite only: the remote
-    /// backends size their vector column themselves.
+    /// memories whose embedding was cleared. SQLite and PostgreSQL;
+    /// OpenSearch sizes its vector field itself.
     pub fn reset_vector_index(&self, new_dims: usize) -> IcmResult<usize> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.reset_vector_index(new_dims),
             #[cfg(feature = "postgres")]
-            Store::Postgres(_) => {
-                let _ = new_dims;
-                Err(IcmError::Unsupported("reset_vector_index".into()))
-            }
+            Store::Postgres(s) => s.reset_vector_index(new_dims),
             #[cfg(feature = "opensearch")]
             Store::OpenSearch(_) => {
                 let _ = new_dims;
@@ -478,11 +501,13 @@ impl Store {
     }
 
     /// [`Self::reset_vector_index`] that also records `model` as the new
-    /// owner of the index, in the same transaction. SQLite only.
+    /// owner of the index, in the same transaction. SQLite and PostgreSQL.
     pub fn reset_vector_index_for_model(&self, new_dims: usize, model: &str) -> IcmResult<usize> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.reset_vector_index_for_model(new_dims, model),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.reset_vector_index_for_model(new_dims, model),
             #[allow(unreachable_patterns)]
             _ => {
                 let _ = (new_dims, model);
@@ -539,8 +564,8 @@ impl Store {
     }
 
     /// Rank-fused search for the v2 recall engine: deep candidates, `keep`
-    /// applied before the cut, optional temporal arm. Only SQLite implements
-    /// it; the remote backends fall back to their existing search.
+    /// applied before the cut, optional temporal arm. SQLite and PostgreSQL
+    /// implement it; OpenSearch falls back to its existing search.
     pub fn search_ranked(
         &self,
         q: &RankedQuery<'_>,
@@ -550,7 +575,7 @@ impl Store {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.search_ranked(q, keep),
             #[cfg(feature = "postgres")]
-            Store::Postgres(_) => self.search_ranked_fallback(q, keep),
+            Store::Postgres(s) => s.search_ranked(q, keep),
             #[cfg(feature = "opensearch")]
             Store::OpenSearch(_) => self.search_ranked_fallback(q, keep),
         }
@@ -560,7 +585,7 @@ impl Store {
     /// backend's own `search_hybrid` when a query embedding is supplied, its
     /// full-text search otherwise. `keep` still runs before the cut to
     /// `q.limit`, but there are no per-arm ranks and `q.window` is ignored.
-    #[cfg(any(feature = "postgres", feature = "opensearch"))]
+    #[cfg(feature = "opensearch")]
     fn search_ranked_fallback(
         &self,
         q: &RankedQuery<'_>,

@@ -30,15 +30,20 @@ impl PostgresStore {
     /// `embedding_dims` is authoritative so we never try to declare a
     /// `vector(N)` column that disagrees with the live table.
     pub(crate) fn connect(requested_dims: usize, readonly: bool) -> IcmResult<Self> {
-        let url = Self::conn_string()?;
-        let mut client = Client::connect(&url, NoTls)
-            .map_err(|e| IcmError::Database(format!("cannot connect to PostgreSQL: {e}")))?;
+        Self::connect_url(&Self::conn_string()?, requested_dims, readonly)
+    }
 
-        let dims = init_schema(&mut client, requested_dims)?;
+    /// [`Self::connect`] against an explicit connection string.
+    pub(crate) fn connect_url(url: &str, requested_dims: usize, readonly: bool) -> IcmResult<Self> {
+        let mut client = Client::connect(url, tls::connector(url)?).map_err(|e| {
+            IcmError::Database(format!("cannot connect to PostgreSQL: {}", describe(&e)))
+        })?;
+
+        let dims = init_schema_serialized(&mut client, requested_dims)?;
 
         Ok(Self {
             client: Mutex::new(client),
-            embedding_dims: dims,
+            embedding_dims: AtomicUsize::new(dims),
             readonly,
         })
     }
@@ -48,15 +53,20 @@ impl PostgresStore {
     /// "expected N dimensions, not M" error.
     pub(crate) fn check_dims(&self, memory: &Memory) -> IcmResult<()> {
         if let Some(emb) = memory.embedding.as_ref()
-            && emb.len() != self.embedding_dims
+            && emb.len() != self.dims()
         {
             return Err(IcmError::InvalidInput(format!(
                 "embedding has {} dimensions, but this store uses {}",
                 emb.len(),
-                self.embedding_dims
+                self.dims()
             )));
         }
         Ok(())
+    }
+
+    /// Dimension of the `vector(N)` columns.
+    pub(crate) fn dims(&self) -> usize {
+        self.embedding_dims.load(Ordering::Relaxed)
     }
 
     /// Open or create a store with the default embedding dimension.
@@ -104,10 +114,40 @@ impl PostgresStore {
     pub fn ensure_vec_init() {}
 }
 
+/// The full-text vector of a memory: its topic, summary and keywords, split
+/// into words on punctuation (see [`tokenizable`]).
+fn memories_fts_expr() -> String {
+    format!(
+        "to_tsvector('simple', {})",
+        tokenizable(
+            "coalesce(topic, '') || ' ' || coalesce(summary, '') || ' ' || coalesce(keywords, '')"
+        )
+    )
+}
+
+/// [`init_schema`] with other processes kept out meanwhile. Several
+/// processes starting at once on an empty database (a rollout of replicas)
+/// otherwise race on `CREATE EXTENSION` and `CREATE TABLE`, and all but one
+/// fail. The others wait here, then find everything in place. The lock is per
+/// database, and released as soon as the setup is done so that a long-lived
+/// process does not hold it.
+pub(super) fn init_schema_serialized(
+    client: &mut Client,
+    requested_dims: usize,
+) -> IcmResult<usize> {
+    client
+        .batch_execute("SELECT pg_advisory_lock(hashtext('icm-schema-init'))")
+        .map_err(pg_err)?;
+    let dims = init_schema(client, requested_dims);
+    // A failed unlock changes nothing: the lock ends with the session.
+    let _ = client.batch_execute("SELECT pg_advisory_unlock(hashtext('icm-schema-init'))");
+    dims
+}
+
 /// Idempotent schema creation. Returns the embedding dimension the table
 /// is actually using (the stored value wins over `requested_dims` on an
 /// existing database).
-fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResult<usize> {
+pub(super) fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResult<usize> {
     if !(64..=4096).contains(&requested_dims) {
         return Err(IcmError::Config(format!(
             "embedding_dims must be between 64 and 4096, got {requested_dims}"
@@ -166,6 +206,32 @@ fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResult<usize> {
             .map_err(pg_err)?;
     }
 
+    // A `memories` table made before the indexed text was split on
+    // punctuation holds the old column. Rebuilding it rewrites the table once;
+    // its GIN index goes with the column and is created again below.
+    let current_fts: Option<String> = client
+        .query_opt(
+            "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d \
+             JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+             WHERE d.adrelid = to_regclass('memories') AND a.attname = 'fts'",
+            &[],
+        )
+        .map_err(pg_err)?
+        .map(|row| row.get(0));
+    if let Some(def) = current_fts
+        && !def.contains("translate(")
+    {
+        client
+            .batch_execute(&format!(
+                "ALTER TABLE memories DROP COLUMN fts; \
+                 ALTER TABLE memories ADD COLUMN fts tsvector \
+                     GENERATED ALWAYS AS ({}) STORED",
+                memories_fts_expr()
+            ))
+            .map_err(pg_err)?;
+    }
+
+    let fts_expr = memories_fts_expr();
     client
         .batch_execute(&format!(
             "CREATE TABLE IF NOT EXISTS memories (
@@ -185,12 +251,7 @@ fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResult<usize> {
                 related_ids TEXT,
                 summary_hash TEXT,
                 embedding vector({dims}),
-                fts tsvector GENERATED ALWAYS AS (
-                    to_tsvector('simple',
-                        coalesce(topic, '') || ' ' ||
-                        coalesce(summary, '') || ' ' ||
-                        coalesce(keywords, ''))
-                ) STORED
+                fts tsvector GENERATED ALWAYS AS ({fts_expr}) STORED
             );
 
             CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories(topic);
@@ -249,6 +310,15 @@ fn init_schema(client: &mut Client, requested_dims: usize) -> IcmResult<usize> {
             CREATE INDEX IF NOT EXISTS idx_hook_events_event ON hook_events(event);"
         ))
         .map_err(pg_err)?;
+
+    client.batch_execute(facts::SCHEMA).map_err(pg_err)?;
+    client
+        .batch_execute(&feedback::schema(dims))
+        .map_err(pg_err)?;
+    client
+        .batch_execute(&transcript::schema())
+        .map_err(pg_err)?;
+    client.batch_execute(&memoir::schema()).map_err(pg_err)?;
 
     // A vector index needs a concrete dimension; create it after the
     // table exists. HNSW is available in pgvector >= 0.5 (the images we
