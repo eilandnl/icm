@@ -53,7 +53,7 @@ impl PostgresStore {
     }
 
     pub(crate) fn connect_maintenance(url: &str) -> IcmResult<Self> {
-        let mut client = Client::connect(url, NoTls).map_err(|e| {
+        let mut client = Client::connect(url, tls::connector(url)?).map_err(|e| {
             IcmError::Database(format!("cannot connect to PostgreSQL: {}", describe(&e)))
         })?;
         let has_metadata: bool = client

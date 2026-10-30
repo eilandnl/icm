@@ -41,7 +41,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use postgres::types::ToSql;
-use postgres::{Client, GenericClient, NoTls};
+use postgres::{Client, GenericClient};
 
 use icm_core::{
     Concept, ConceptLink, Embedder, Fact, FactsStats, FactsStore, Feedback, FeedbackStats,
@@ -82,6 +82,7 @@ mod ranked;
 mod rows;
 #[cfg(test)]
 mod tests;
+mod tls;
 mod transcript;
 
 pub(crate) use rows::*;

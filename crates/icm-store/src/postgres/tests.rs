@@ -1,5 +1,7 @@
 //! Test suite for the PostgreSQL backend (`postgres::tests`).
 
+use postgres::NoTls;
+
 use super::*;
 
 /// Audit regression: a keyword containing `%`/`_` was interpolated

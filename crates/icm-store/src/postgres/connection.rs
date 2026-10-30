@@ -35,7 +35,7 @@ impl PostgresStore {
 
     /// [`Self::connect`] against an explicit connection string.
     pub(crate) fn connect_url(url: &str, requested_dims: usize, readonly: bool) -> IcmResult<Self> {
-        let mut client = Client::connect(url, NoTls).map_err(|e| {
+        let mut client = Client::connect(url, tls::connector(url)?).map_err(|e| {
             IcmError::Database(format!("cannot connect to PostgreSQL: {}", describe(&e)))
         })?;
 

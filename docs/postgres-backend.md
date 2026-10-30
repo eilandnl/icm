@@ -109,14 +109,30 @@ or your platform's) if you want to keep the old vectors.
 Other ICM processes keep checking against the old size until they restart,
 and PostgreSQL rejects a vector of the wrong size with its own error.
 
+## TLS
+
+The connection follows the `sslmode` of the connection string: `disable`
+never uses TLS, the default (`prefer`) tries TLS and falls back to plain text
+when the server has none, and `require` fails when the server offers none.
+Whenever TLS is used the server certificate and its host name are verified,
+so `require` is stricter than libpq's (which skips verification) and there is
+no way to turn verification off. Roots are the system store plus, optionally,
+the PEM file in `ICM_POSTGRES_CA_FILE`, for a private CA or a provider's own
+bundle (for example RDS):
+
+```sh
+export ICM_POSTGRES_URL="postgres://user:pass@db.example.com:5432/icm?sslmode=require"
+export ICM_POSTGRES_CA_FILE=/etc/ssl/db-ca.pem
+```
+
+Client certificates are not supported. If a host name resolves to both IPv6
+and IPv4 and only one of them works, the error shown is the last attempt's
+(often "Connection refused"), which can hide a certificate failure; connect
+by IP or fix the DNS to see it.
+
 ## Known limits
 
-- **No TLS.** The backend connects without TLS. A server that requires it,
-  as many managed ones do by default, rejects the connection (`pg_hba.conf
-  rejects connection ... no encryption`), and `sslmode=require` fails with
-  `no TLS implementation configured`. Use it inside the network of the
-  database, for example in the same Kubernetes cluster, or through a tunnel,
-  until TLS is added.
+- **TLS is verified, not configurable beyond the CA.** See "TLS" below.
 - **Every process runs the schema setup when it starts**: 27 round trips,
   about 30 ms on localhost. Hooks start a process on each tool call, so at
   a 20 ms round trip to the database that is about half a second per hook.
