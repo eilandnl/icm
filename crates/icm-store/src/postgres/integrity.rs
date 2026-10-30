@@ -172,7 +172,7 @@ impl PostgresStore {
         }
         let mut c = self.conn()?;
         // The schema is written to be run again: it only adds what is absent.
-        connection::init_schema(&mut c, self.dims())?;
+        connection::init_schema_serialized(&mut c, self.dims())?;
         for table in SEARCHED_TABLES {
             c.batch_execute(&format!("REINDEX TABLE {table}"))
                 .map_err(pg_err)?;

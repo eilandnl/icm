@@ -279,3 +279,26 @@ fn a_usize_max_limit_means_no_limit() {
     let (concepts, links) = store.get_neighborhood(&concept, usize::MAX).unwrap();
     assert_eq!((concepts.len(), links.len()), (1, 0));
 }
+
+/// A rollout of replicas starts several processes at once on an empty
+/// database. Without the setup being serialized, all but one fail on
+/// `CREATE EXTENSION`.
+#[test]
+fn many_first_starts_at_once_all_succeed() {
+    let Some(url) = live_database("first_starts") else {
+        return;
+    };
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let (url, barrier) = (url.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                PostgresStore::connect_url(&url, 64, false).map(|_| ())
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap().unwrap();
+    }
+}

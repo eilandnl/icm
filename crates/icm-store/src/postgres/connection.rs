@@ -38,7 +38,7 @@ impl PostgresStore {
         let mut client = Client::connect(url, NoTls)
             .map_err(|e| IcmError::Database(format!("cannot connect to PostgreSQL: {e}")))?;
 
-        let dims = init_schema(&mut client, requested_dims)?;
+        let dims = init_schema_serialized(&mut client, requested_dims)?;
 
         Ok(Self {
             client: Mutex::new(client),
@@ -111,6 +111,25 @@ impl PostgresStore {
     /// No-op on PostgreSQL (the SQLite backend uses this to load the
     /// `sqlite-vec` extension; `pgvector` lives server-side).
     pub fn ensure_vec_init() {}
+}
+
+/// [`init_schema`] with other processes kept out meanwhile. Several
+/// processes starting at once on an empty database (a rollout of replicas)
+/// otherwise race on `CREATE EXTENSION` and `CREATE TABLE`, and all but one
+/// fail. The others wait here, then find everything in place. The lock is per
+/// database, and released as soon as the setup is done so that a long-lived
+/// process does not hold it.
+pub(super) fn init_schema_serialized(
+    client: &mut Client,
+    requested_dims: usize,
+) -> IcmResult<usize> {
+    client
+        .batch_execute("SELECT pg_advisory_lock(hashtext('icm-schema-init'))")
+        .map_err(pg_err)?;
+    let dims = init_schema(client, requested_dims);
+    // A failed unlock changes nothing: the lock ends with the session.
+    let _ = client.batch_execute("SELECT pg_advisory_unlock(hashtext('icm-schema-init'))");
+    dims
 }
 
 /// Idempotent schema creation. Returns the embedding dimension the table
