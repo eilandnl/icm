@@ -23,6 +23,11 @@ that benefits from being shared:
 - keyword search, full-text search (PostgreSQL `tsvector` + GIN),
   vector KNN (`pgvector`, cosine), and the hybrid blend (30% FTS / 70%
   vector)
+- ranked recall (`search_ranked`): a lexical and a vector arm fetched deep,
+  filtered, fused by Reciprocal Rank Fusion, with the optional time
+  window. The lexical arm ranks by `ts_rank_cd`, not BM25, so the raw BM25
+  score is not reported; the vector arm reaches at most 1000 candidates
+  (pgvector's `hnsw.ef_search` ceiling), and an HNSW scan is approximate
 - `list`, `topics`, `stats`, `health`
 - temporal `decay` (access-aware) and `prune`
 - the ancillary tables used by the normal store/recall/hook path:
@@ -84,6 +89,13 @@ icm stats
 
 # Integration tests (skipped automatically when the env var is unset):
 cargo test -p icm-store --no-default-features --features postgres -- --test-threads=1
+
+# Ranked-search tests: each one creates its own database on this server, so
+# the role needs CREATEDB and a separate variable guards against pointing
+# them at a database you care about.
+ICM_POSTGRES_TEST_URL="postgres://icm:icm@127.0.0.1:55432/icm" \
+    cargo test -p icm-store --no-default-features --features postgres \
+    --lib postgres::ranked -- --test-threads=1
 ```
 
 ## Kubernetes

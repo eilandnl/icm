@@ -539,8 +539,8 @@ impl Store {
     }
 
     /// Rank-fused search for the v2 recall engine: deep candidates, `keep`
-    /// applied before the cut, optional temporal arm. Only SQLite implements
-    /// it; the remote backends fall back to their existing search.
+    /// applied before the cut, optional temporal arm. SQLite and PostgreSQL
+    /// implement it; OpenSearch falls back to its existing search.
     pub fn search_ranked(
         &self,
         q: &RankedQuery<'_>,
@@ -550,7 +550,7 @@ impl Store {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.search_ranked(q, keep),
             #[cfg(feature = "postgres")]
-            Store::Postgres(_) => self.search_ranked_fallback(q, keep),
+            Store::Postgres(s) => s.search_ranked(q, keep),
             #[cfg(feature = "opensearch")]
             Store::OpenSearch(_) => self.search_ranked_fallback(q, keep),
         }
@@ -560,7 +560,7 @@ impl Store {
     /// backend's own `search_hybrid` when a query embedding is supplied, its
     /// full-text search otherwise. `keep` still runs before the cut to
     /// `q.limit`, but there are no per-arm ranks and `q.window` is ignored.
-    #[cfg(any(feature = "postgres", feature = "opensearch"))]
+    #[cfg(feature = "opensearch")]
     fn search_ranked_fallback(
         &self,
         q: &RankedQuery<'_>,

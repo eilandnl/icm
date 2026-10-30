@@ -90,6 +90,7 @@ mod maintenance;
 mod memoir;
 mod memory;
 mod patterns;
+mod ranked;
 mod rows;
 #[cfg(test)]
 mod tests;

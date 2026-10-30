@@ -30,8 +30,12 @@ impl PostgresStore {
     /// `embedding_dims` is authoritative so we never try to declare a
     /// `vector(N)` column that disagrees with the live table.
     pub(crate) fn connect(requested_dims: usize, readonly: bool) -> IcmResult<Self> {
-        let url = Self::conn_string()?;
-        let mut client = Client::connect(&url, NoTls)
+        Self::connect_url(&Self::conn_string()?, requested_dims, readonly)
+    }
+
+    /// [`Self::connect`] against an explicit connection string.
+    pub(crate) fn connect_url(url: &str, requested_dims: usize, readonly: bool) -> IcmResult<Self> {
+        let mut client = Client::connect(url, NoTls)
             .map_err(|e| IcmError::Database(format!("cannot connect to PostgreSQL: {e}")))?;
 
         let dims = init_schema(&mut client, requested_dims)?;
