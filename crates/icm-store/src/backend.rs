@@ -282,14 +282,16 @@ impl Store {
     }
 
     /// List every active fact across all entities (for `icm export`).
-    /// Only supported on the SQLite backend.
+    /// Supported on the SQLite and PostgreSQL backends.
     pub fn list_all_facts(&self) -> IcmResult<Vec<Fact>> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.list_all_facts(),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.list_all_facts(),
             #[allow(unreachable_patterns)]
             _ => Err(IcmError::Config(
-                "list_all_facts is only supported on the SQLite backend".into(),
+                "list_all_facts is only supported on the SQLite and PostgreSQL backends".into(),
             )),
         }
     }

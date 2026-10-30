@@ -37,8 +37,15 @@ that benefits from being shared:
   hook telemetry, the async extraction queue, code areas, and the
   key/value metadata.
 
-The heavier subsystems — memoir graph, verbatim transcripts, structured
-facts, feedback, and pattern mining — return a clear
+- structured facts (`icm facts …`): one active value per `(entity, key)`
+  with the superseded values kept as history; writers on the same slot
+  take turns, so replicas can set facts concurrently
+- feedback (`icm feedback …`): corrections of past predictions, searched by
+  a 30% full-text / 70% semantic blend. The semantic part is an exact
+  scan with no vector index, as feedback is low-cardinality
+
+The remaining subsystems — memoir graph, verbatim transcripts, and
+pattern mining — return a clear
 `operation not supported on this storage backend` error on PostgreSQL for
 now. They remain fully available on the default SQLite backend.
 

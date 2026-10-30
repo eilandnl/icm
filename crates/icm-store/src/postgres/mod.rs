@@ -27,8 +27,8 @@
 //! Scope of this first cut: the full [`MemoryStore`] surface (the core
 //! shared-memory use case behind #301) plus the ancillary tables used by
 //! the normal store/recall/hook path (hook telemetry, the extraction
-//! queue, code areas, the key/value metadata). The heavier subsystems
-//! (memoir graph, transcripts, structured facts, feedback, pattern
+//! queue, code areas, the key/value metadata), structured facts and
+//! feedback. The remaining subsystems (memoir graph, transcripts, pattern
 //! mining) return [`IcmError::Unsupported`] on this backend for now;
 //! they remain fully available on the default SQLite backend.
 

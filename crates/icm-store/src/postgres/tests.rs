@@ -36,12 +36,12 @@ fn test_apply_decay_formula_would_go_negative_without_clamp() {
     );
 }
 
-/// A store in a fresh database of the server named by
+/// The URL of a fresh database on the server named by
 /// `ICM_POSTGRES_TEST_URL` (`postgres://user@host:port/db`, a role that may
 /// create databases and the pgvector extension), or `None` to skip when it
 /// is not set. One database per test: the schema setup looks indexes up by
 /// name, so tests cannot share a database.
-pub(crate) fn live_store(name: &str, dims: usize) -> Option<PostgresStore> {
+pub(crate) fn live_database(name: &str) -> Option<String> {
     let base = std::env::var("ICM_POSTGRES_TEST_URL").ok()?;
     let (server, _) = base.rsplit_once('/').expect("URL ends in /<database>");
     let database = format!("icm_test_{name}");
@@ -54,7 +54,12 @@ pub(crate) fn live_store(name: &str, dims: usize) -> Option<PostgresStore> {
             .batch_execute(&statement)
             .expect("reset test database");
     }
-    let url = format!("{server}/{database}");
+    Some(format!("{server}/{database}"))
+}
+
+/// A store in a fresh database, see [`live_database`].
+pub(crate) fn live_store(name: &str, dims: usize) -> Option<PostgresStore> {
+    let url = live_database(name)?;
     Some(PostgresStore::connect_url(&url, dims, false).expect("open test store"))
 }
 

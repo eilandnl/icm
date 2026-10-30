@@ -8,6 +8,13 @@ pub(crate) fn pg_err(e: postgres::Error) -> IcmError {
     IcmError::Database(e.to_string())
 }
 
+/// A `usize` as a SQL `LIMIT`/`OFFSET` bound. Callers pass `usize::MAX` for
+/// "no limit", and `as i64` wraps that to -1, which SQLite reads as no limit
+/// but PostgreSQL rejects as negative.
+pub(crate) fn sql_bound(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
 pub(crate) fn lock_err() -> IcmError {
     IcmError::Database("postgres client mutex poisoned".into())
 }
