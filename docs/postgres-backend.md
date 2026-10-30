@@ -107,6 +107,26 @@ or your platform's) if you want to keep the old vectors.
 Other ICM processes keep checking against the old size until they restart,
 and PostgreSQL rejects a vector of the wrong size with its own error.
 
+## Known limits
+
+- **No TLS.** The backend connects without TLS. A server that requires it,
+  as many managed ones do by default, rejects the connection (`pg_hba.conf
+  rejects connection ... no encryption`), and `sslmode=require` fails with
+  `no TLS implementation configured`. Use it inside the network of the
+  database, for example in the same Kubernetes cluster, or through a tunnel,
+  until TLS is added.
+- **Every process runs the schema setup when it starts**: 27 round trips,
+  about 30 ms on localhost. Hooks start a process on each tool call, so at
+  a 20 ms round trip to the database that is about half a second per hook.
+  Keep the database close, or use the MCP server, which stays running.
+- **One connection per process**, without a pool.
+- **Recall quality is measured, not assumed.** On a copy of a real database
+  of 7,788 memories, a query made of a memory's five rarest words found
+  that memory first in 94% of cases against 96% on SQLite, with the same top
+  result in 97% of queries; a query made of its keywords found it first in
+  70% against 63%. It was not measured with embeddings, on other corpora, or
+  with a vector index larger than a few thousand rows.
+
 ## Requirements
 
 PostgreSQL with the [`pgvector`](https://github.com/pgvector/pgvector)
