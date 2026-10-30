@@ -67,10 +67,22 @@ that benefits from being shared:
 
 These act on the SQLite file itself, and PostgreSQL has its own tools for
 each: the integrity check (`PRAGMA integrity_check`), rebuilding the search
-indexes (`REINDEX`), the file backup and its rotation (`pg_dump`), and
-resetting the vector index for a new embedding model (the `vector(N)`
-column is sized when the database is created). They return an error on
-PostgreSQL.
+indexes (`REINDEX`) and the file backup and its rotation (`pg_dump`). They
+return an error on PostgreSQL.
+
+## Changing the embedding model
+
+The `vector(N)` columns are sized when the database is created, and the
+stored size wins over what a later run asks for. To move to a model with
+another dimension, reset the vector index: it clears every stored vector
+(they are derived data), resizes the vector columns of `memories` and
+`feedback`, recreates the HNSW index and records the new size and model, in
+one transaction. Then `icm embed` computes the vectors again. Take a
+database snapshot first (`pg_dump`, or your platform's), since the reset
+discards the old vectors.
+
+Other ICM processes keep checking against the old size until they restart,
+and PostgreSQL rejects a vector of the wrong size with its own error.
 
 ## Requirements
 

@@ -34,6 +34,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
@@ -60,7 +61,9 @@ pub use crate::common::{
 /// PostgreSQL-backed store. See the module docs.
 pub struct PostgresStore {
     client: Mutex<Client>,
-    embedding_dims: usize,
+    /// Dimension of the `vector(N)` columns. Changes when the vector index
+    /// is reset for another embedding model.
+    embedding_dims: AtomicUsize,
     readonly: bool,
 }
 

@@ -42,7 +42,7 @@ impl PostgresStore {
 
         Ok(Self {
             client: Mutex::new(client),
-            embedding_dims: dims,
+            embedding_dims: AtomicUsize::new(dims),
             readonly,
         })
     }
@@ -52,15 +52,20 @@ impl PostgresStore {
     /// "expected N dimensions, not M" error.
     pub(crate) fn check_dims(&self, memory: &Memory) -> IcmResult<()> {
         if let Some(emb) = memory.embedding.as_ref()
-            && emb.len() != self.embedding_dims
+            && emb.len() != self.dims()
         {
             return Err(IcmError::InvalidInput(format!(
                 "embedding has {} dimensions, but this store uses {}",
                 emb.len(),
-                self.embedding_dims
+                self.dims()
             )));
         }
         Ok(())
+    }
+
+    /// Dimension of the `vector(N)` columns.
+    pub(crate) fn dims(&self) -> usize {
+        self.embedding_dims.load(Ordering::Relaxed)
     }
 
     /// Open or create a store with the default embedding dimension.

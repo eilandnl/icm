@@ -100,7 +100,7 @@ impl PostgresStore {
         }
 
         let match_expr = lexical_query(q.text);
-        let embedding = q.embedding.filter(|e| e.len() == self.embedding_dims);
+        let embedding = q.embedding.filter(|e| e.len() == self.dims());
 
         let mut depth = q.depth.clamp(MIN_DEPTH, MAX_DEPTH);
         let mut fts = self.ranked_fts_arm(&match_expr, depth, keep)?;

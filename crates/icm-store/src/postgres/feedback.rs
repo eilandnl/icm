@@ -68,12 +68,12 @@ impl FeedbackStore for PostgresStore {
             return Err(IcmError::ReadOnly("store_feedback".into()));
         }
         if let Some(embedding) = &feedback.embedding
-            && embedding.len() != self.embedding_dims
+            && embedding.len() != self.dims()
         {
             return Err(IcmError::InvalidInput(format!(
                 "embedding has {} dimensions, but this store uses {}",
                 embedding.len(),
-                self.embedding_dims
+                self.dims()
             )));
         }
         let embedding = feedback
@@ -142,7 +142,7 @@ impl FeedbackStore for PostgresStore {
         }
 
         let mut vec_scores: HashMap<String, f32> = HashMap::new();
-        if let Some(embedding) = query_embedding.filter(|e| e.len() == self.embedding_dims) {
+        if let Some(embedding) = query_embedding.filter(|e| e.len() == self.dims()) {
             let qv = pgvector::Vector::from(embedding.to_vec());
             let rows = c
                 .query(

@@ -464,17 +464,14 @@ impl Store {
 
     /// Drop every stored vector and recreate the vector index at `new_dims`
     /// (the explicit `icm embed --migrate` path). Returns the number of
-    /// memories whose embedding was cleared. SQLite only: the remote
-    /// backends size their vector column themselves.
+    /// memories whose embedding was cleared. SQLite and PostgreSQL;
+    /// OpenSearch sizes its vector field itself.
     pub fn reset_vector_index(&self, new_dims: usize) -> IcmResult<usize> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.reset_vector_index(new_dims),
             #[cfg(feature = "postgres")]
-            Store::Postgres(_) => {
-                let _ = new_dims;
-                Err(IcmError::Unsupported("reset_vector_index".into()))
-            }
+            Store::Postgres(s) => s.reset_vector_index(new_dims),
             #[cfg(feature = "opensearch")]
             Store::OpenSearch(_) => {
                 let _ = new_dims;
@@ -484,11 +481,13 @@ impl Store {
     }
 
     /// [`Self::reset_vector_index`] that also records `model` as the new
-    /// owner of the index, in the same transaction. SQLite only.
+    /// owner of the index, in the same transaction. SQLite and PostgreSQL.
     pub fn reset_vector_index_for_model(&self, new_dims: usize, model: &str) -> IcmResult<usize> {
         match self {
             #[cfg(feature = "backend-sqlite")]
             Store::Sqlite(s) => s.reset_vector_index_for_model(new_dims, model),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(s) => s.reset_vector_index_for_model(new_dims, model),
             #[allow(unreachable_patterns)]
             _ => {
                 let _ = (new_dims, model);
