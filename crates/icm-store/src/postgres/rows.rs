@@ -96,6 +96,62 @@ pub(crate) const BM25_JOINS: &str = "CROSS JOIN bs CROSS JOIN bq \
 pub(crate) const BM25_SCORE: &str = "SUM(ln(1 + (bs.n - bx.df + 0.5) / (bx.df + 0.5)) \
      * (bx.tf * 2.2) / (bx.tf + 1.2 * (0.25 + 0.75 * length(m.fts) / bs.avgdl)))::float8";
 
+/// What a BM25 query needs to know about `table`.
+pub(crate) struct Bm25Stats {
+    /// Each distinct word of the query as the index holds it, and the number
+    /// of rows that contain it, rarest first.
+    pub terms: Vec<(String, f64)>,
+    /// Rows in the table.
+    pub n: f64,
+    /// Average length of the `fts` column, in words.
+    pub avgdl: f64,
+}
+
+/// The statistics of `words` over the `fts` column of `table`. The average
+/// length is an exact scan on a small table and a 5% block sample on a large
+/// one: 4 ms instead of 45 ms on 100k rows, and BM25 does not need it exact.
+pub(crate) fn bm25_stats(c: &mut Client, table: &str, words: &str) -> IcmResult<Bm25Stats> {
+    let rows = c
+        .query(
+            &format!(
+                "WITH t AS MATERIALIZED ( \
+                     SELECT DISTINCT lexeme FROM unnest(to_tsvector('simple', $1))) \
+                 SELECT lexeme, (SELECT count(*) FROM {table} \
+                          WHERE fts @@ plainto_tsquery('simple', lexeme))::float8 AS df, \
+                        (SELECT count(*) FROM {table})::float8 \
+                 FROM t ORDER BY df, lexeme"
+            ),
+            &[&words],
+        )
+        .map_err(pg_err)?;
+    let n = rows.first().map_or(0.0, |row| row.get::<_, f64>(2));
+    let terms = rows
+        .iter()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, f64>(1)))
+        .collect();
+    let sampled: Option<f64> = if n > 20_000.0 {
+        c.query_one(
+            &format!("SELECT avg(length(fts))::float8 FROM {table} TABLESAMPLE SYSTEM (5)"),
+            &[],
+        )
+        .map_err(pg_err)?
+        .get(0)
+    } else {
+        None
+    };
+    let avgdl = match sampled {
+        Some(avgdl) => avgdl,
+        None => c
+            .query_one(
+                &format!("SELECT coalesce(avg(length(fts)), 1)::float8 FROM {table}"),
+                &[],
+            )
+            .map_err(pg_err)?
+            .get(0),
+    };
+    Ok(Bm25Stats { terms, n, avgdl })
+}
+
 /// The words of `text` to weigh in a BM25 query: letters and digits, the
 /// `or` between them dropped.
 pub(crate) fn bm25_words(text: &str) -> String {

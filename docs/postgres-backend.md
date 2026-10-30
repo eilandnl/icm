@@ -36,8 +36,10 @@ that benefits from being shared:
   unfindable by two of its own words. The `memories` column is rebuilt once
   on the first start after upgrading (4 s for 8,000 memories); other
   tables are created with it. The statistics BM25 needs are computed per
-  query, which scans the table for its average length: about 5 ms per 10,000
-  rows
+  query. On a large table the average length is sampled, and a word that is
+  in more than 5% of the memories (and in more than 1,000) is left out of
+  the candidates as a stop word would be; a query of only such words is
+  ranked by `ts_rank_cd` and has no BM25 score
 - `list`, `topics`, `stats`, `health`
 - temporal `decay` (access-aware) and `prune`
 - auto-consolidation (`[memory] auto_consolidate_enabled`): the same
@@ -120,6 +122,10 @@ and PostgreSQL rejects a vector of the wrong size with its own error.
   a 20 ms round trip to the database that is about half a second per hook.
   Keep the database close, or use the MCP server, which stays running.
 - **One connection per process**, without a pool.
+- **Recall time grows with the table.** On 101,000 memories (debug build,
+  localhost, everything above included): a rare word 85 ms, five ordinary
+  words 145 ms, a 15-word sentence 245 ms. Without leaving out common words
+  the same five words took 0.9 s.
 - **Recall quality is measured, not assumed.** On a copy of a real database
   of 7,788 memories, a query made of a memory's five rarest words found
   that memory first in 94% of cases against 96% on SQLite, with the same top

@@ -27,6 +27,12 @@ const MIN_DEPTH: usize = 20;
 const MAX_DEPTH: usize = 2000;
 /// Ceiling on vector candidates: pgvector's `hnsw.ef_search` maximum.
 const VEC_MAX_DEPTH: usize = 1000;
+/// A term is common when it is in more than this share of the memories and
+/// in more than [`COMMON_FLOOR`] of them. See `ranked_fts_arm`.
+const COMMON_SHARE: f64 = 0.05;
+/// Below this many memories a term is never common: the table is too small
+/// for one to be costly, and small stores keep their exact BM25.
+const COMMON_FLOOR: f64 = 1000.0;
 /// Each widening pass multiplies the depth by this much.
 const WIDEN_FACTOR: usize = 4;
 /// Widening passes after the first fetch.
@@ -204,8 +210,15 @@ impl PostgresStore {
         Ok(hits)
     }
 
-    /// Lexical arm: BM25 order (see [`bm25_with`]), at most `depth` rows,
-    /// filtered by `keep`.
+    /// Lexical arm: BM25 order, at most `depth` rows, filtered by `keep`.
+    ///
+    /// Terms found in more than [`COMMON_SHARE`] of the memories (and
+    /// [`COMMON_FLOOR`] of them) add almost nothing to a BM25 score but pull
+    /// in tens of thousands of candidates, which took 0.9 s on 100k memories
+    /// for a sentence of ordinary words. They are left out, as stop words
+    /// are; a query made only of such terms is ranked by `ts_rank_cd`, which
+    /// is cheap and, with nothing to tell the words apart, no worse. Small
+    /// tables are never affected: the floor is above their size.
     fn ranked_fts_arm(
         &self,
         match_expr: &str,
@@ -220,25 +233,74 @@ impl PostgresStore {
         let words = match_expr.replace(" or ", " ");
 
         let mut c = self.conn()?;
-        let rows = c
-            .query(
-                &format!(
-                    "{with}SELECT {LEX_COLS}, {BM25_SCORE} AS bm25 \
-                     FROM memories m {BM25_JOINS} \
-                     WHERE m.fts @@ bq.tsq \
-                     GROUP BY m.id, bs.n, bs.avgdl \
-                     ORDER BY bm25 DESC, m.id ASC \
-                     LIMIT $3",
-                    with = bm25_with("memories", "$1", "$2")
-                ),
-                &[&words, &match_expr, &sql_bound(depth)],
-            )
-            .map_err(pg_err)?;
-        let saturated = rows.len() >= depth;
-        let bm25 = rows
+        let stats = bm25_stats(&mut c, "memories", &words)?;
+        let informative: Vec<&(String, f64)> = stats
+            .terms
             .iter()
-            .map(|row| (row.get::<_, String>(0), row.get::<_, f64>(15) as f32))
+            .filter(|(_, df)| *df > 0.0 && *df <= (stats.n * COMMON_SHARE).max(COMMON_FLOOR))
             .collect();
+
+        let (rows, bm25_ranked) = if informative.is_empty() {
+            // Nothing to weigh: the cheap ranking, over the whole query.
+            let rows = c
+                .query(
+                    &format!(
+                        "SELECT {ARM_COLS} \
+                         FROM memories, websearch_to_tsquery('simple', $1) AS q \
+                         WHERE fts @@ q \
+                         ORDER BY ts_rank_cd(fts, q) DESC, id ASC \
+                         LIMIT $2"
+                    ),
+                    &[&match_expr, &sql_bound(depth)],
+                )
+                .map_err(pg_err)?;
+            (rows, false)
+        } else {
+            let lexemes: Vec<String> = informative.iter().map(|(l, _)| l.clone()).collect();
+            let dfs: Vec<f64> = informative.iter().map(|(_, df)| *df).collect();
+            let tsquery = lexemes
+                .iter()
+                .map(|l| format!("'{}'", l.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let rows = c
+                .query(
+                    &format!(
+                        "SELECT {LEX_COLS}, SUM(ln(1 + ($4::float8 - d.df + 0.5) / (d.df + 0.5)) \
+                             * (d.tf * 2.2) / (d.tf + 1.2 * (0.25 + 0.75 * length(m.fts) / $5::float8))\
+                             )::float8 AS bm25 \
+                         FROM memories m \
+                         CROSS JOIN LATERAL ( \
+                             SELECT t.df, array_length(u.positions, 1)::float8 AS tf \
+                             FROM unnest(m.fts) u \
+                             JOIN unnest($1::text[], $2::float8[]) AS t(lexeme, df) \
+                               ON t.lexeme = u.lexeme) d \
+                         WHERE m.fts @@ to_tsquery('simple', $3) \
+                         GROUP BY m.id \
+                         ORDER BY bm25 DESC, m.id ASC \
+                         LIMIT $6"
+                    ),
+                    &[
+                        &lexemes,
+                        &dfs,
+                        &tsquery,
+                        &stats.n,
+                        &stats.avgdl,
+                        &sql_bound(depth),
+                    ],
+                )
+                .map_err(pg_err)?;
+            (rows, true)
+        };
+        drop(c);
+        let saturated = rows.len() >= depth;
+        let bm25 = if bm25_ranked {
+            rows.iter()
+                .map(|row| (row.get::<_, String>(0), row.get::<_, f64>(15) as f32))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         Ok(Arm {
             kept: rows
                 .iter()
@@ -677,6 +739,48 @@ mod tests {
             .search_ranked(&query("common zephyr", None, 5, 50), &all)
             .unwrap();
         assert_eq!(hits[0].memory.id, "z-rare");
+    }
+
+    /// Above the floor, a word in nearly every memory is left out of the
+    /// candidates, so a sentence of ordinary words does not score the whole
+    /// table; a query made only of such words is still answered.
+    #[test]
+    fn common_terms_do_not_pull_in_every_memory() {
+        let Some(store) = store("common_terms") else {
+            return;
+        };
+        store
+            .conn()
+            .unwrap()
+            .batch_execute(
+                "INSERT INTO memories (id, created_at, updated_at, last_accessed, topic, \
+                                       summary, importance, source_type) \
+                 SELECT 'c-' || g, now(), now(), now(), 'notes', 'common filler ' || g, \
+                        'medium', 'manual' \
+                 FROM generate_series(1, 1100) g",
+            )
+            .unwrap();
+        put(
+            &store,
+            "z-rare",
+            "notes",
+            "zephyr and one common word",
+            None,
+        );
+
+        // "common" is in 1,101 of 1,101: left out; "zephyr" selects.
+        let hits = store
+            .search_ranked(&query("common zephyr", None, 5, 50), &all)
+            .unwrap();
+        assert_eq!(ids(&hits), vec!["z-rare"]);
+        assert!(hits[0].raw.bm25.is_some());
+
+        // Nothing but common words: ranked cheaply, without a BM25 score.
+        let hits = store
+            .search_ranked(&query("common", None, 5, 50), &all)
+            .unwrap();
+        assert_eq!(hits.len(), 5);
+        assert!(hits.iter().all(|h| h.raw.bm25.is_none()));
     }
 
     #[test]
