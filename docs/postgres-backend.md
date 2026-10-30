@@ -51,7 +51,14 @@ that benefits from being shared:
   parentheses are not understood, and a malformed query matches loosely
   instead of returning nothing. Results rank by `ts_rank_cd`, not BM25
 
-The remaining subsystems — memoir graph and pattern mining — return a clear
+- memoirs (`icm memoir …`): named memoirs of concepts with typed links that
+  must stay acyclic, concept refinement, and search by words or by label.
+  A neighbourhood is walked in one recursive query instead of one query per
+  concept, link inserts take turns so two replicas cannot each add half of
+  a cycle, and a label search matches one whole label, so `domain` of one
+  label and `rust` of another never combine as they can on SQLite
+
+The remaining subsystem — pattern mining — returns a clear
 `operation not supported on this storage backend` error on PostgreSQL for
 now. They remain fully available on the default SQLite backend.
 

@@ -200,3 +200,82 @@ fn auto_consolidate_with_embedder_attaches_an_embedding() {
     assert_eq!(embedding.len(), icm_core::DEFAULT_EMBEDDING_DIMS);
     assert!((embedding[0] - 0.42).abs() < 1e-6);
 }
+
+#[test]
+fn sql_bound_never_goes_negative() {
+    assert_eq!(sql_bound(0), 0);
+    assert_eq!(sql_bound(42), 42);
+    assert_eq!(sql_bound(usize::MAX), i64::MAX);
+}
+
+/// Callers pass `usize::MAX` for "no limit" (`icm export` does). Cast with
+/// `as i64` that is -1, which SQLite accepts and PostgreSQL rejects.
+#[test]
+fn a_usize_max_limit_means_no_limit() {
+    let Some(store) = live_store("limits_max", 64) else {
+        return;
+    };
+    let sid = store.create_session("cli", Some("p"), None).unwrap();
+    store
+        .record_message(&sid, Role::User, "hello world", None, None, None)
+        .unwrap();
+    store
+        .store_feedback(Feedback::new(
+            "t".into(),
+            "c".into(),
+            "p".into(),
+            "x".into(),
+            None,
+            "s".into(),
+        ))
+        .unwrap();
+    let memoir = store
+        .create_memoir(Memoir::new("m".into(), String::new()))
+        .unwrap();
+    let concept = store
+        .add_concept(Concept::new(
+            memoir.clone(),
+            "alpha".into(),
+            "alpha concept".into(),
+        ))
+        .unwrap();
+
+    assert_eq!(store.list_feedback(None, usize::MAX).unwrap().len(), 1);
+    assert_eq!(store.list_sessions(None, usize::MAX).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .list_session_messages(&sid, usize::MAX, 0)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search_transcripts("hello", None, None, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search_concepts_fts(&memoir, "alpha", usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search_all_concepts_fts("alpha", usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .search_concepts_by_label(&memoir, &Label::new("a", "b"), usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+    let (concepts, links) = store.get_neighborhood(&concept, usize::MAX).unwrap();
+    assert_eq!((concepts.len(), links.len()), (1, 0));
+}

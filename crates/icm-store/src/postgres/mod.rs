@@ -27,10 +27,10 @@
 //! Scope of this first cut: the full [`MemoryStore`] surface (the core
 //! shared-memory use case behind #301) plus the ancillary tables used by
 //! the normal store/recall/hook path (hook telemetry, the extraction
-//! queue, code areas, the key/value metadata), structured facts, feedback
-//! and transcripts. The remaining subsystems (memoir graph, pattern
-//! mining) return [`IcmError::Unsupported`] on this backend for now;
-//! they remain fully available on the default SQLite backend.
+//! queue, code areas, the key/value metadata), structured facts, feedback,
+//! transcripts and the memoir graph. Pattern mining returns
+//! [`IcmError::Unsupported`] on this backend for now; it remains fully
+//! available on the default SQLite backend.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -62,12 +62,6 @@ pub struct PostgresStore {
     client: Mutex<Client>,
     embedding_dims: usize,
     readonly: bool,
-}
-
-fn unsupported<T>(op: &str) -> IcmResult<T> {
-    Err(IcmError::Unsupported(format!(
-        "{op} (use the default SQLite backend)"
-    )))
 }
 
 mod connection;

@@ -54,7 +54,7 @@ fn row_to_feedback(row: &postgres::Row) -> Feedback {
 /// AND-joined words of `text`, as `websearch_to_tsquery` text: every word
 /// must match, like the SQLite backend. Anything but letters and digits
 /// separates words, and a bare `or` is dropped (it would be the operator).
-fn and_query(text: &str) -> String {
+pub(super) fn and_query(text: &str) -> String {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty() && !w.eq_ignore_ascii_case("or"))
         .take(100)
